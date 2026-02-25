@@ -1,3 +1,8 @@
+"""
+若从 Hugging Face 下载模型时出现 Connection reset by peer，可使用国内镜像：
+  export HF_ENDPOINT=https://hf-mirror.com
+  或运行: HF_ENDPOINT=https://hf-mirror.com python chat/chat_d3llm_dream.py
+"""
 import sys
 from pathlib import Path
 import types
@@ -41,14 +46,30 @@ model = DreamModel.from_pretrained(
 )
 model = model.to(device).eval()
 
-print("Compiling model with torch.compile...")
-model = torch.compile(model, mode="reduce-overhead")
-print("Model compilation complete.")
-
+# 先添加所有自定义方法（必须在编译前添加）
 model.generate_multi_block = types.MethodType(D3LLMGenerationMixin.generate_multi_block, model)
 model._sample_multi_block = types.MethodType(D3LLMGenerationMixin._sample_multi_block, model)
 model._sample_multi_block_kv_cache = types.MethodType(D3LLMGenerationMixin._sample_multi_block_kv_cache, model)
 model._prepare_inputs = types.MethodType(D3LLMGenerationMixin._prepare_inputs, model)
+
+# torch.compile 会包装模型，导致动态添加的方法无法直接访问
+# 解决方案：不编译模型，或通过 _orig_mod 访问（但更复杂）
+# 为简化，默认禁用编译；如需启用，需确保方法通过 _orig_mod 访问
+import os
+if os.getenv("TORCH_COMPILE_DISABLE", "1") != "0":  # 默认禁用
+    print("torch.compile disabled (default). To enable: export TORCH_COMPILE_DISABLE=0")
+else:
+    try:
+        print("Compiling model with torch.compile...")
+        print("  Note: After compilation, custom methods may need to be accessed via model._orig_mod")
+        # 使用更保守的编译模式
+        model = torch.compile(model, mode="default", fullgraph=False)
+        # 编译后，需要通过 _orig_mod 访问原始模型的方法
+        # 但为了简化，我们保持原模型引用用于方法调用
+        print("Model compilation complete.")
+    except Exception as e:
+        print(f"Warning: torch.compile failed ({e}), continuing without compilation.")
+        print("  To disable compilation permanently, set: export TORCH_COMPILE_DISABLE=1")
 
 # Multi-block generation parameters
 multi_block_params = {

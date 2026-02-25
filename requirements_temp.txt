@@ -1,4 +1,3 @@
-# torch 与 flash_attn 由 setup_env.sh 单独安装（PyTorch 需指定 cu128 源，FlashAttention 需从源码编译）
 transformers==4.49.0
 datasets==3.2.0
 lm_eval==0.4.9
@@ -7,7 +6,6 @@ aiohttp==3.13.0
 appdirs==1.4.4
 astor==0.8.1
 attrs==25.4.0
-auto_gptq==0.7.1
 beautifulsoup4==4.14.2
 bert_score==0.3.13
 black==25.11.0
@@ -46,22 +44,19 @@ jsonschema==4.25.1
 kstar_planner==1.4.16
 langcodes==3.5.0
 langdetect==1.0.9
-# pddl 需 lark<1.2.0，与其它包折中
-lark>=1.1.5,<1.2.0
+lark==1.3.1
 liger_kernel==0.6.4
 lightning==2.5.6
-# lmflow 在 PyPI 仅有 dev 版本，项目未直接引用，可选: pip install lmflow (从 GitHub)
 mamba_ssm==2.2.6.post3
 math_verify==0.8.0
 matplotlib==3.10.7
 mistralai==1.9.11
 more_itertools==10.8.0
 multipledispatch==1.0.0
-# nemo 与 Pillow 版本冲突且项目未直接使用，可选安装
+nemo==7.2.5
 neologdn==0.5.4
 nltk==3.9.2
-# numpy 2.3.x 需 Python>=3.11，Python 3.10 使用 2.2.x（与 PyTorch 已装版本兼容）
-numpy>=2.0,<2.3
+numpy==2.3.5
 omegaconf==2.3.0
 optimum==2.0.0
 packaging==25.0
@@ -69,10 +64,7 @@ pandas==2.3.3
 pddl==0.4.3
 pebble==5.1.3
 peft==0.14.0
-# Pillow 由 torchvision 已安装，与 gradio/matplotlib 兼容即可
-Pillow>=8,<13
 pqdm==0.2.0
-# promptsource 已从 PyPI 下架，可选: pip install "lm_eval[promptsource]" 或从 GitHub 安装
 psutil==7.1.0
 pycountry==24.6.1
 pymorphy2==0.9.1
@@ -84,7 +76,7 @@ PyYAML==6.0.3
 radgraph==0.1.18
 ray==2.52.0
 regex==2025.9.18
-requests==2.32.5
+Requests==2.32.5
 rich==14.2.0
 rouge==1.0.1
 rouge_score==0.1.2
@@ -92,36 +84,33 @@ sacrebleu==2.5.1
 sae_lens==6.22.3
 safetensors==0.7.0
 sandbox_fusion==0.3.7
-scikit-learn==1.7.2
-# scipy 1.16.3 不存在，使用兼容版本
-scipy>=1.10,<1.16
+scikit_learn==1.7.2
+scipy==1.16.3
 sentence_transformers==5.1.2
 setuptools==80.9.0
-# sglang 强依赖 transformers==4.57.1，与项目要求的 4.49.0 冲突，可选安装
+sglang==0.5.5.post3
 sparsify==1.7.0
 sqlitedict==2.1.0
 stop_sequencer==1.2.3
 sympy==1.13.3
 tabulate==0.9.0
-# tarski 与 hydra/omegaconf 的 antlr4 版本冲突，可选安装
+tarski==0.8.2
 tempdir==0.7.1
 tenacity==9.1.2
 tensordict==0.10.0
 termcolor==3.2.0
 tiktoken==0.12.0
 tilus==0.1.1
-# 与 transformers 4.49.0 兼容：tokenizers>=0.21,<0.22
-tokenizers>=0.21,<0.22
 torchdata==0.11.0
 tqdm==4.66.5
 tqdm_multiprocess==0.0.11
-# transformer_lens 要求 numpy<2，与 PyTorch 的 numpy 2.x 冲突，可选安装
+transformer_lens==2.16.1
 tree_sitter==0.25.2
 tree_sitter_python==0.25.0
 triton==3.3.1
 uvicorn==0.38.0
-# veomni 要求 datasets<=2.21.0，与项目 datasets 3.2.0 冲突，可选安装
-# verl 要求 numpy<2，与 PyTorch 的 numpy 2.x 冲突，可选安装
+veomni==0.1.0
+verl==0.6.1
 wget==3.2
 wonderwords==3.0.1
 word2number==1.1
