@@ -17,6 +17,7 @@
 
 import evaluate as hf_evaluate
 import os
+import re
 import sys
 from sanitize import sanitize
 
@@ -29,6 +30,37 @@ def pass_at_1(references, predictions):
         predictions=predictions,
         k=[1],
     )[0]["pass@1"]
+
+
+def extract_completion_from_response(raw_resp: str) -> str:
+    """
+    从模型原始输出中提取代码补全部分，兼容 Dream（带 ``` 结尾）与 LLaDA（可能无 markdown 或带说明文字）。
+    """
+    s = raw_resp.strip()
+    # 1) ```python\n ... ```（含无 python 标记的 ``` ... ```）
+    for marker in ("```python\n", "```python", "```"):
+        if marker in s:
+            parts = s.split(marker, 1)[-1].split("```", 1)
+            code = parts[0].strip()
+            if code and (code.startswith("def ") or "\n    " in code or code.startswith("    ")):
+                return code
+            if code:
+                return code
+    # 2) 无 markdown：去掉开头的说明文，从首行“代码”开始（def 或 4 空格缩进）
+    lines = s.splitlines()
+    start = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("def ") or (line.startswith("    ") and stripped):
+            start = i
+            break
+        if re.match(r"^[\s]*#", line) or re.match(r"^[\s]+[a-zA-Z_]", line):
+            start = i
+            break
+    return "\n".join(lines[start:]).strip() or s
+
 
 import json
 
@@ -45,7 +77,7 @@ data = read_jsonl(file_path)
 
 references = [sample['target'] for sample in data]
 
-predictions = [[sanitize(sample['doc']['prompt'] + "\n" + sample['resps'][0][0].split('```python\n', 1)[-1].split('```')[0], 
+predictions = [[sanitize(sample['doc']['prompt'] + "\n" + extract_completion_from_response(sample['resps'][0][0]), 
                 sample['doc']["entry_point"])] 
                 for sample in data]
 
