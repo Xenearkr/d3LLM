@@ -61,11 +61,8 @@ case "$MODEL" in
         NUM_FEWSHOT=0
         [[ "$DATASET" == "mbpp" ]] && NUM_FEWSHOT=3
 
-        # lm_eval 的任务名（humaneval 使用 humaneval_instruct，以便内部使用 build_predictions_instruct + sanitize）
+        # LLaDA 系与论文/基线一致：使用 humaneval（base），不用 humaneval_instruct；pass@1 以 postprocess_code_humaneval.py 输出为准
         TASK="$DATASET"
-        if [[ "$DATASET" == "humaneval" ]]; then
-            TASK="humaneval_instruct"
-        fi
 
         if [[ "$MODEL" == "d3llm_llada" ]]; then
             MODEL_PATH="d3LLM/d3LLM_LLaDA"
@@ -80,7 +77,7 @@ case "$MODEL" in
             --confirm_run_unsafe_code --model llada_dist \
             --model_args model_path="$MODEL_PATH",gen_length=$LENGTH,steps=$STEPS,block_length=$BLOCK_LENGTH,show_speed=True,task="$TASK" \
             --output_path "evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}" --log_samples
-        latest_jsonl=$(find "evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}/${METHOD_NAME_ENCODED}" -name "samples_${TASK}_*.jsonl" -type f 2>/dev/null | head -n 1)
+        latest_jsonl=$(find "evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}/${METHOD_NAME_ENCODED}" -name "samples_${DATASET}_*.jsonl" -type f 2>/dev/null | head -n 1)
         if [[ -n "$latest_jsonl" ]]; then
             if [[ "$DATASET" == "humaneval" ]]; then
                 python postprocess_code_humaneval.py "$latest_jsonl"
