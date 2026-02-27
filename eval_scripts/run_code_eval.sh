@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在 HumanEval / MBPP 上评估现有 dLLM
 # 用法: bash run_code_eval.sh <模型> <数据集>
-#   模型: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada
+#   模型: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada | d3llm_dream_coder | vanilla_dream_coder
 #   数据集: humaneval | mbpp
 # 需设置 HF_ALLOW_CODE_EVAL=1（脚本会检查并提示）
 
@@ -14,7 +14,7 @@ DATASET="${2:-}"
 
 if [[ -z "$MODEL" || -z "$DATASET" ]]; then
     echo "用法: $0 <模型> <数据集>"
-    echo "  模型: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada"
+    echo "  模型: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada | d3llm_dream_coder | vanilla_dream_coder"
     echo "  数据集: humaneval | mbpp"
     exit 1
 fi
@@ -89,9 +89,55 @@ case "$MODEL" in
         fi
         echo "LLaDA 评估完成。结果见: $D3LLM_ROOT/utils/utils_LLaDA/evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}/"
         ;;
+    d3llm_dream_coder|vanilla_dream_coder)
+        # Dream-Coder 系：使用 utils/utils_DreamCoder/code_eval/evalplus 下自带的 evalplus（与 dream-coder.sh 保持一致）
+        # 目录结构为 evalplus/evalplus/...，需在该目录下以 PYTHONPATH=. 调用本地包
+        cd "$D3LLM_ROOT/utils/utils_DreamCoder/code_eval/evalplus"
+        CKPT_DIR=""
+        if [[ "$MODEL" == "d3llm_dream_coder" ]]; then
+            CKPT_DIR="d3LLM/d3LLM_Dream_Coder"
+        else
+            CKPT_DIR="Dream-org/Dream-Coder-v0-Instruct-7B"
+        fi
+
+        echo "Running Dream-Coder evalplus for model: $CKPT_DIR on dataset: $DATASET"
+
+        if [[ "$MODEL" == "d3llm_dream_coder" ]]; then
+            # d3LLM Dream-Coder：multi_block 解码（与 dream-coder.sh 一致）
+            PYTHONPATH=. python -m evalplus.evaluate \
+                --model "$CKPT_DIR" \
+                --trust_remote_code True \
+                --max_new_tokens 512 \
+                --diffusion_steps 512 \
+                --dataset "$DATASET" \
+                --backend dllm \
+                --temperature 0.0 \
+                --generation_method generation_multi_block \
+                --alg entropy_threshold \
+                --threshold 0.5 \
+                --block_length 32 \
+                --block_add_threshold 0.1 \
+                --decoded_token_threshold 0.95 \
+                --cache_delay_iter 32 \
+                --early_stop True \
+                --torch_compile True
+        else
+            # 原生 Dream-Coder：vanilla diffusion 解码
+            PYTHONPATH=. python -m evalplus.evaluate \
+                --model "$CKPT_DIR" \
+                --trust_remote_code True \
+                --max_new_tokens 512 \
+                --diffusion_steps 512 \
+                --dataset "$DATASET" \
+                --backend dllm \
+                --temperature 0.1
+        fi
+
+        echo "Dream-Coder 评估完成（结果在 evalplus 默认输出目录，如 evalplus_results/ 或命令行输出中）。"
+        ;;
     *)
         echo "错误: 未知模型 $MODEL"
-        echo "  可选: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada"
+        echo "  可选: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada | d3llm_dream_coder | vanilla_dream_coder"
         exit 1
         ;;
 esac

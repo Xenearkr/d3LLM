@@ -12,10 +12,16 @@ from evalplus.provider.utility import (
 )
 
 import sys
-sys.path.append('/')
-sys.path.append('../')
-sys.path.append('../../')
-sys.path.append('../../../')
+from pathlib import Path
+
+# 确保 d3LLM 根目录在 sys.path 里，这样可以 import utils.utils_Dream
+# 当前文件路径类似：
+#   /home/.../d3LLM/utils/utils_DreamCoder/code_eval/evalplus/evalplus/provider/dllm.py
+# 需要回到 d3LLM 根目录（parents[6]）
+ROOT = Path(__file__).resolve().parents[6]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 class DLLMDecoder(DecoderBase):
     def __init__(
