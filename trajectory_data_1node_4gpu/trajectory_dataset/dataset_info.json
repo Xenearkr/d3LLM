@@ -1,0 +1,48 @@
+{
+  "citation": "",
+  "description": "",
+  "features": {
+    "idx": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "question": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "prompt_ids": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "trajectory": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "final_output": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "generated_text": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "llm_answer": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "gt_answer": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "is_correct": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "nfe": {
+      "dtype": "null",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": ""
+}

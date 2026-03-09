@@ -564,6 +564,7 @@ class DreamGenerationMixin:
         input_ids, attention_mask, generation_config = self._prepare_inputs(inputs, generation_config, **kwargs)
         threshold = kwargs.get("threshold", 0.5)
         block_length = kwargs.get("block_length", 32)
+        trajectory_one_step = kwargs.get("trajectory_one_step", False)
         
         result, nfe = self._sample(
             input_ids,
@@ -571,6 +572,7 @@ class DreamGenerationMixin:
             generation_config=generation_config,
             threshold=threshold,
             block_length=block_length,
+            trajectory_one_step=trajectory_one_step,
         )
         return result, nfe
 
