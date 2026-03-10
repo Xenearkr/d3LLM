@@ -23,3 +23,5 @@ coder_data/
 .gradio
 null/
 *.log
+README_TRAINING.md
+DATASET_INFO.md
