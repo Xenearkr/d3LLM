@@ -22,3 +22,4 @@ cache/
 coder_data/
 .gradio
 null/
+*.log
