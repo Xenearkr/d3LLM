@@ -13,6 +13,7 @@ def main(
     block_length=32,
     output_dir="trajectory_output",
     max_data_num=-1,
+    trajectory_one_step=False,
 ):
     """Distributed trajectory generation for DREAM using multiple GPUs across multiple nodes"""
 
@@ -83,6 +84,8 @@ def main(
         "--max_data_num",
         str(max_data_num),
     ]
+    if trajectory_one_step:
+        cmd.append("--trajectory_one_step")
 
     env = os.environ.copy()
     # Use local GPU ID
@@ -173,6 +176,11 @@ if __name__ == "__main__":
         default=-1,
         help="Max number of samples to generate (-1 for no limit)",
     )
+    parser.add_argument(
+        "--trajectory_one_step",
+        action="store_true",
+        help="Only save the trajectory of one step"
+    )
     args = parser.parse_args()
 
     main(
@@ -182,4 +190,5 @@ if __name__ == "__main__":
         args.block_length,
         args.output_dir,
         args.max_data_num,
+        args.trajectory_one_step,
     )

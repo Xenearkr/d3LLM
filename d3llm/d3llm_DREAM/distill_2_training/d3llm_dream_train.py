@@ -105,6 +105,19 @@ def prepare_model(config: Dict[str, Any]):
     if lora_config_dict and lora_config_dict.get("enabled", False):
         print("=" * 80)
         print("Applying LoRA configuration...")
+        # 为不支持 generate 的 DreamModel 打一个假的 prepare_inputs_for_generation，
+        # 以兼容 peft 在 CAUSAL_LM 等 task_type 下的检查。
+        from types import MethodType
+
+        def _dummy_prepare_inputs_for_generation(self, input_ids, **kwargs):
+            # 训练阶段只用到 forward，不依赖 generate，这里返回最简单的输入字典即可。
+            return {"input_ids": input_ids, **kwargs}
+
+        # 给基础模型挂载该方法，防止 peft 访问时报错
+        if not hasattr(model, "prepare_inputs_for_generation"):
+            model.prepare_inputs_for_generation = MethodType(
+                _dummy_prepare_inputs_for_generation, model
+            )
         lora_config = LoraConfig(
             r=lora_config_dict.get("r", 16),
             lora_alpha=lora_config_dict.get("lora_alpha", 16),
@@ -114,7 +127,7 @@ def prepare_model(config: Dict[str, Any]):
             ]),
             lora_dropout=lora_config_dict.get("lora_dropout", 0.0),
             bias=lora_config_dict.get("bias", "none"),
-            task_type=lora_config_dict.get("task_type", "CAUSAL_LM")
+            task_type=lora_config_dict.get("task_type", "FEATURE_EXTRACTION")
         )
         
         model = get_peft_model(model, lora_config)
@@ -129,8 +142,14 @@ def prepare_model(config: Dict[str, Any]):
     
     return model, tokenizer
 
+def get_trajectory_from_one_step(tracjectory_one_step, target_idx):
+    x = tracjectory_one_step[0]
+    for i in range(1, target_idx+1):
+        x[tracjectory_one_step[i]["pos"]] = tracjectory_one_step[i]["val"]
+    return x
 
-def select_trajectory_by_ratio(trajectories, mask_ratio, mask_token_id, block_start, block_end):
+
+def select_trajectory_by_ratio(self, trajectories, mask_ratio, mask_token_id, block_start, block_end, trajectory_one_step=False):
     """Select the trajectory step with mask ratio closest to target mask ratio in the current block
     
     Args:
@@ -156,7 +175,10 @@ def select_trajectory_by_ratio(trajectories, mask_ratio, mask_token_id, block_st
     target_idx = block_start + num_unmasked
     target_idx = min(target_idx, len(trajectories) - 1)
     
-    return trajectories[target_idx]
+    if self.trajectory_one_step:
+        return get_trajectory_from_one_step(trajectories, target_idx)
+    else:
+        return trajectories[target_idx]
 
 
 def naive_random_mask(trajectories, mask_ratio, mask_token_id, block_start, block_end):
@@ -174,6 +196,7 @@ def forward_process_with_trajectory(
     use_blockwise=False,
     use_naive_random_mask=False,
     use_complementary_loss=False,
+    trajectory_one_step=False,
     eps=1e-3,
 ):
     """Forward masking using teacher trajectories
@@ -219,7 +242,7 @@ def forward_process_with_trajectory(
         # Get trajectory or use random masking
         traj_fn = naive_random_mask if use_naive_random_mask else select_trajectory_by_ratio
         traj_step = traj_fn(
-            trajectory_batch[i], mask_ratio, mask_token_id, mask_start - prompt_len, mask_end - prompt_len
+            trajectory_batch[i], mask_ratio, mask_token_id, mask_start - prompt_len, mask_end - prompt_len, trajectory_one_step
         )
         
         # print(f"[Debug-2] mask_start: {mask_start}, mask_end: {mask_end}, len traj_step: {len(traj_step)}")
@@ -281,6 +304,7 @@ class DLMTrainer(Trainer):
         use_naive_random_mask=False,
         use_complementary_loss=False,
         trajectory_dataset=None,
+        trajectory_one_step=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -295,7 +319,7 @@ class DLMTrainer(Trainer):
         self.use_naive_random_mask = use_naive_random_mask
         self.use_complementary_loss = use_complementary_loss
         self.trajectory_dataset = trajectory_dataset
-    
+        self.trajectory_one_step = trajectory_one_step
     def get_current_block_size(self):
         """Calculate current block size based on epoch progress (linear interpolation)"""
         if self.state.epoch is None:
@@ -423,10 +447,13 @@ class DLMTrainer(Trainer):
         # Dynamically load trajectories from trajectory_dataset based on sample_idx
         trajectories = []
         for idx in sample_indices.cpu().tolist():
-            if self.trajectory_dataset is not None and idx < len(self.trajectory_dataset):
-                traj = self.trajectory_dataset[idx]["trajectory"]
+            if self.trajectory_one_step:
+
             else:
-                traj = []
+                if self.trajectory_dataset is not None and idx < len(self.trajectory_dataset):
+                    traj = self.trajectory_dataset[idx]["trajectory"]
+                else:
+                    traj = []
             trajectories.append(traj)
         
         # Get current mask ratio and block size
@@ -442,6 +469,7 @@ class DLMTrainer(Trainer):
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
                 use_complementary_loss=True,
+                trajectory_one_step=self.trajectory_one_step,
             )
         else:
             noisy_batch, masked_indices = forward_process_with_trajectory(
@@ -449,6 +477,7 @@ class DLMTrainer(Trainer):
                 mask_token_id=self.mask_token_id, block_size=current_block_size,
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
+                trajectory_one_step=self.trajectory_one_step,
             )
         
         # token shift
@@ -621,7 +650,8 @@ def main():
     # 2. Load trajectory dataset and create mapping
     distill_config = config.get("distillation", {})
     trajectory_dataset_path = distill_config.get("trajectory_dataset_path")
-    
+    trajectory_one_step = distill_config.get("trajectory_one_step", False)
+
     if trajectory_dataset_path:
         # Handle relative path from script directory (only if it's a local path)
         if not os.path.isabs(trajectory_dataset_path):
@@ -696,14 +726,17 @@ def main():
                     "trajectory": processed_trajectories,
                 }
             
-            print(f"Preprocessing trajectories (truncate/pad to max_length={max_length})...")
-            trajectory_dataset = trajectory_dataset.map(
-                preprocess_trajectory_sample,
-                batched=True,
-                num_proc=num_proc,
-                desc="Preprocessing trajectories"
-            )
-            print(f"Trajectory preprocessing completed!")
+            if trajectory_one_step:
+                print(f"Since the data is one step delta,process the trajectory when computing the loss")
+            else:
+                print(f"Preprocessing trajectories (truncate/pad to max_length={max_length})...")
+                trajectory_dataset = trajectory_dataset.map(
+                    preprocess_trajectory_sample,
+                    batched=True,
+                    num_proc=num_proc,
+                    desc="Preprocessing trajectories"
+                )
+                print(f"Trajectory preprocessing completed!")
             
             # Save preprocessed dataset to cache
             try:
@@ -907,6 +940,7 @@ def main():
         use_naive_random_mask=distill_config.get("use_naive_random_mask", False),
         use_complementary_loss=distill_config.get("use_complementary_loss", False),
         trajectory_dataset=trajectory_dataset,  # Pass trajectory_dataset for dynamic loading
+        trajectory_one_step=trajectory_one_step,
     )
     
     print(f"Training with progressive block sizes: {trainer.progressive_block_sizes}")

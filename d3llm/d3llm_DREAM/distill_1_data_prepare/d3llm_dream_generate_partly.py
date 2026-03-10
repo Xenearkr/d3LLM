@@ -129,6 +129,7 @@ def generate_teacher_model_trajectory(
     temperature=0.0,
     threshold=0.5,
     mask_token_id=None,
+    trajectory_one_step=False,
 ):
     """Generate trajectory for DREAM teacher model with block-wise diffusion decoding"""
     
@@ -155,6 +156,7 @@ def generate_teacher_model_trajectory(
         generation_config,
         threshold: Optional[float] = 0.5,
         block_length: Optional[int] = 32,
+        trajectory_one_step: Optional[bool] = False,
     ):
         # init values
         output_history = generation_config.output_history
@@ -197,6 +199,9 @@ def generate_teacher_model_trajectory(
             tok_idx = None
             attention_mask = "full"
 
+        if trajectory_one_step:
+            trajectory.append(x)
+
         # Process each block
         i = 0
         for num_block in range(num_blocks):
@@ -206,7 +211,7 @@ def generate_teacher_model_trajectory(
                 
             while True:  
                 i += 1  
-                mask_index = (x == mask_token_id_val)      
+                mask_index = (x == mask_token_id_val)
 
                 model_output = self(x, attention_mask, tok_idx)
 
@@ -244,8 +249,17 @@ def generate_teacher_model_trajectory(
                     x[transfer_index] = x_[transfer_index].clone()
 
                 # Store trajectory after each step
-                trajectory.append(x.clone())
-
+                if trajectory_one_step:
+                    positions = transfer_index[0].nonzero()
+                    values = x_[0][transfer_index[0]]
+                    trajectory.append(
+                        {
+                            "pos" : positions,
+                            "val" : values
+                        }
+                    )
+                else:
+                    trajectory.append(x.clone())
                 if (x[:, current_block_start:current_block_end] == mask_token_id_val).sum() == 0:
                     break
         
@@ -275,6 +289,7 @@ def generate_teacher_model_trajectory(
             top_k=None,
             block_length=block_length,
             threshold=threshold,
+            trajectory_one_step=trajectory_one_step,
         )
         
         final_output = output.sequences
@@ -294,6 +309,7 @@ def main(
     block_length=32,
     output_file="trajectory_data.json",
     max_data_num=-1,
+    trajectory_one_step=False,
 ):
     from datasets import load_dataset
     from tqdm import tqdm
@@ -365,6 +381,7 @@ def main(
                 block_length=block_length,
                 temperature=current_temperature,
                 threshold=-float('inf'),
+                trajectory_one_step=trajectory_one_step,
             )
 
             # Decode generated text and check correctness
@@ -380,12 +397,19 @@ def main(
             print(f"Attempt {attempt + 1}/{max_attempts} failed for idx {idx} (temperature={current_temperature:.1f}), retrying...", flush=True)
 
         # Store result: convert tensors to lists for JSON serialization
+        processed_trajectory = []
+        if trajectory_one_step:
+            processed_trajectory.append(trajectory[0])
+            for traj in trajectory[1:]:
+                processed_trajectory.append((traj["pos"][0].cpu().tolist(), traj["val"][0].cpu().tolist()))
+        else:
+            processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
         results.append(
             {
                 "idx": idx,
                 "question": prompt_text,
                 "prompt_ids": prompt_ids,
-                "trajectory": [traj[0].cpu().tolist() for traj in trajectory],
+                "trajectory": processed_trajectory,
                 "final_output": final_output[0].cpu().tolist(),
                 "generated_text": generated_text,
                 "llm_answer": llm_answer,
@@ -432,6 +456,11 @@ if __name__ == "__main__":
         default=-1,
         help="Max number of samples to generate (-1 for no limit)",
     )
+    parser.add_argument(
+        "--trajectory_one_step",
+        action="store_true",
+        help="Only save the trajectory of one step"
+    )
     args = parser.parse_args()
 
     main(
@@ -442,4 +471,5 @@ if __name__ == "__main__":
         args.block_length,
         args.output_file,
         args.max_data_num,
+        args.trajectory_one_step,
     )

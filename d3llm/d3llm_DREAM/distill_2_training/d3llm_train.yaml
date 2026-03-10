@@ -54,3 +54,4 @@ distillation:
     temperature: 0.5
     entropy_weight: 1.0
     num_proc: 8
+    trajectory_one_step: false
