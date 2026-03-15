@@ -71,7 +71,7 @@ def get_deepspeed_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "bf16": {"enabled": "auto"},
         "zero_optimization": {
             "stage": 2,
-            "offload_optimizer": {"device": "cpu", "pin_memory": True},  # Disabled due to CUDA version mismatch
+            "offload_optimizer": {"device": "cpu", "pin_memory": True},
             "allgather_partitions": True,
             "allgather_bucket_size": 2e8,
             "reduce_scatter": True,
@@ -105,6 +105,19 @@ def prepare_model(config: Dict[str, Any]):
     if lora_config_dict and lora_config_dict.get("enabled", False):
         print("=" * 80)
         print("Applying LoRA configuration...")
+        # 为不支持 generate 的 DreamModel 打一个假的 prepare_inputs_for_generation，
+        # 以兼容 peft 在 CAUSAL_LM 等 task_type 下的检查。
+        from types import MethodType
+
+        def _dummy_prepare_inputs_for_generation(self, input_ids, **kwargs):
+            # 训练阶段只用到 forward，不依赖 generate，这里返回最简单的输入字典即可。
+            return {"input_ids": input_ids, **kwargs}
+
+        # 给基础模型挂载该方法，防止 peft 访问时报错
+        if not hasattr(model, "prepare_inputs_for_generation"):
+            model.prepare_inputs_for_generation = MethodType(
+                _dummy_prepare_inputs_for_generation, model
+            )
         lora_config = LoraConfig(
             r=lora_config_dict.get("r", 16),
             lora_alpha=lora_config_dict.get("lora_alpha", 16),
@@ -114,7 +127,7 @@ def prepare_model(config: Dict[str, Any]):
             ]),
             lora_dropout=lora_config_dict.get("lora_dropout", 0.0),
             bias=lora_config_dict.get("bias", "none"),
-            task_type=lora_config_dict.get("task_type", "CAUSAL_LM")
+            task_type=lora_config_dict.get("task_type", "FEATURE_EXTRACTION")
         )
         
         model = get_peft_model(model, lora_config)

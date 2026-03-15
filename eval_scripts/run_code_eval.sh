@@ -41,8 +41,16 @@ case "$MODEL" in
         [[ "$DATASET" == "mbpp" ]] && NUM_FEWSHOT=4
         cd "$D3LLM_ROOT/utils/utils_Dream/eval_instruct"
         if [[ "$MODEL" == "d3llm_dream" ]]; then
+            # 若已用 scripts/merge_dream_lora.py 合并并保存到本地，可设置环境变量指向合并后的目录，例如：
+            # export D3LLM_DREAM_CHECKPOINT="output_model/d3LLM_DREAM_merged"   # 相对仓库根
+            # export D3LLM_DREAM_CHECKPOINT="/path/to/d3LLM/output_model/d3LLM_DREAM_merged"  # 或绝对路径
+            if [[ -n "${D3LLM_DREAM_CHECKPOINT:-}" && "$D3LLM_DREAM_CHECKPOINT" != /* ]]; then
+                DREAM_PRETRAINED="$D3LLM_ROOT/$D3LLM_DREAM_CHECKPOINT"
+            else
+                DREAM_PRETRAINED="${D3LLM_DREAM_CHECKPOINT:-d3LLM/d3LLM_Dream}"
+            fi
             PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval --model diffllm \
-                --model_args torch_compile=False,pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.5,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000,early_stop=True \
+                --model_args torch_compile=False,pretrained="$DREAM_PRETRAINED",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.5,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000,early_stop=True \
                 --tasks "$TASK" --device cuda --batch_size 1 --num_fewshot "$NUM_FEWSHOT" \
                 --output_path ./eval_tmp/code_eval_"$MODEL"_"$DATASET" --log_samples --confirm_run_unsafe_code --apply_chat_template
         else
