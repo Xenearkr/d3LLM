@@ -147,7 +147,8 @@ class DreamGenerationConfig(GenerationConfig):
         # Validate the values of the attributes
         self.validate(is_init=True)
 
-    def validate(self, is_init=False):
+    def validate(self, is_init=False, strict=True, **kwargs):
+        """Accept strict= for compatibility with transformers GenerationConfig.save_pretrained()."""
         pass
 
 class DreamGenerationMixin:

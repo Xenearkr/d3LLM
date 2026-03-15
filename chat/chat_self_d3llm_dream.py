@@ -22,9 +22,8 @@ from utils.utils_Dream.model.configuration_dream import DreamConfig
 from d3llm.d3llm_DREAM.d3llm_dream_generate_util import DreamGenerationMixin as D3LLMGenerationMixin
 
 # Model path
-m = "Dream-org/Dream-v0-Instruct-7B"
-lora_path = "output_model/d3LLM_DREAM_local_0304_225336/checkpoint-5742"
-# m = "d3LLM/d3LLM_Dream_Coder"
+# 使用合并后的完整模型时：只填 m 为合并目录
+m = "output_model/merged_d3LLM_DREAM_5742"
 
 tokenizer = AutoTokenizer.from_pretrained(m, trust_remote_code=True)
 device = torch.device("cuda:0")
@@ -41,7 +40,7 @@ except Exception as e:
     print(f"Warning: Could not set Flash Attention 2 in config: {e}")
 
 model = DreamModel.from_pretrained(
-    m, 
+    m,
     config=model_config,
     trust_remote_code=True,
     torch_dtype=torch.bfloat16
@@ -51,8 +50,6 @@ if not hasattr(model, "prepare_inputs_for_generation"):
     def _prepare_inputs_for_generation(self, input_ids, **kwargs):
         return {"input_ids": input_ids, **kwargs}
     model.prepare_inputs_for_generation = types.MethodType(_prepare_inputs_for_generation, model)
-model = PeftModel.from_pretrained(model, lora_path)
-model = model.merge_and_unload()
 model = model.to(device).eval()
 
 # 先添加所有自定义方法（必须在编译前添加）
