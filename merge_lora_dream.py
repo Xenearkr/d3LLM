@@ -3,10 +3,10 @@
 将 Dream base 模型与本地训练的 LoRA checkpoint 合并，并保存为完整模型目录。
 合并后的模型可直接用于 eval_scripts（思路 A：pretrained=合并后目录）。
 
-用法（在项目根目录 d3LLM 下执行, YOUR_CHECKPOINT_PATH 和 YOUR_CHECKPOINT_ID 需要替换为实际的 LoRA checkpoint 路径和 ID）:
+用法（在项目根目录 d3LLM 下执行, YOUR_CHECKPOINT_PATH 需要替换为实际的 LoRA checkpoint 路径）:
   python merge_lora_dream.py \
     --base Dream-org/Dream-v0-Instruct-7B \
-    --lora_path output_model/d3LLM_DREAM_local_YOUR_CHECKPOINT_PATH/checkpoint-YOUR_CHECKPOINT_ID \
+    --lora_path output_model/d3LLM_DREAM_local_YOUR_CHECKPOINT_PATH/checkpoint-5742\
     --output_dir output_model/merged_d3LLM_DREAM_5742
 
   # 使用国内镜像下载 base 时:
