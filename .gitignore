@@ -8,6 +8,7 @@ evals_results/
 .hf_cache/
 try.py
 trajectory_output/
+trajectory_data_1node_4gpu/
 output_model/
 output_models/
 sample_llada.json

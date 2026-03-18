@@ -200,8 +200,10 @@ def generate_teacher_model_trajectory(
             attention_mask = "full"
 
         if trajectory_one_step:
-            trajectory.append(x)
-
+            unmask_time = torch.zeros_like(x, device=x.device, dtype=torch.int)
+        else:
+            unmask_time = None
+            
         # Process each block
         i = 0
         for num_block in range(num_blocks):
@@ -248,21 +250,19 @@ def generate_teacher_model_trajectory(
                             transfer_index[0, select_index[0, k]] = False
                     x[transfer_index] = x_[transfer_index].clone()
 
+
                 # Store trajectory after each step
                 if trajectory_one_step:
-                    positions = transfer_index[0].nonzero()
-                    values = x_[0][transfer_index[0]]
-                    trajectory.append(
-                        {
-                            "pos" : positions,
-                            "val" : values
-                        }
-                    )
+                    unmask_time[transfer_index] = i
                 else:
                     trajectory.append(x.clone())
                 if (x[:, current_block_start:current_block_end] == mask_token_id_val).sum() == 0:
                     break
         
+
+        if trajectory_one_step:
+            trajectory.append(unmask_time)
+            trajectory.append(x.clone())
         from d3llm.d3llm_DREAM.d3llm_dream_generate_util import DreamModelOutput
         if return_dict_in_generate:
             return DreamModelOutput(sequences=x, history=histories), i
@@ -399,9 +399,7 @@ def main(
         # Store result: convert tensors to lists for JSON serialization
         processed_trajectory = []
         if trajectory_one_step:
-            processed_trajectory.append(trajectory[0])
-            for traj in trajectory[1:]:
-                processed_trajectory.append((traj["pos"][0].cpu().tolist(), traj["val"][0].cpu().tolist()))
+            processed_trajectory=[trajectory[0].cpu().tolist(), trajectory[1].cpu().tolist()]
         else:
             processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
         results.append(
