@@ -31,8 +31,8 @@ def main(
     # Only the first task does dataset loading and final concatenation
     if slurm_procid == 0:
         # Load dataset to get total size
-        dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-        # dataset = load_dataset("coder_data/Ling-Coder-dParallel-merged-512-120k", split="train")
+        # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
+        dataset = load_dataset("d3llm/Ling-Coder-dParallel-merged-512-120k", split="train")
         total_size = len(dataset)
 
         # Apply max_data_num limit

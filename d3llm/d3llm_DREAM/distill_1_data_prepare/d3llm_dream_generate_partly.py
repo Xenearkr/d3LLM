@@ -318,11 +318,11 @@ def main(
     device = "cuda"
 
     # Load DREAM teacher model
-    model_path = "Dream-org/Dream-v0-Instruct-7B"
-    # model_path = "Dream-org/Dream-Coder-v0-Instruct-7B"
+    # model_path = "Dream-org/Dream-v0-Instruct-7B"
+    model_path = "Dream-org/Dream-Coder-v0-Instruct-7B"
     teacher_model = AutoModel.from_pretrained(
         model_path, 
-        torch_dtype=torch.bfloat16, 
+        dtype=torch.bfloat16, 
         trust_remote_code=True
     ).to(device).eval()
     
@@ -331,8 +331,8 @@ def main(
     )
 
     # Load dataset
-    dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-    # dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
+    # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
+    dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
 
     # Apply max_data_num limit
     if max_data_num > 0:
