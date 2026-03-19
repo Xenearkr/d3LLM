@@ -90,6 +90,6 @@ else
 fi
 
 # 使用方式：
-# cd /home/u-chenx/chenx/d3LLM/d3llm/d3llm_DREAM/distill_1_data_prepare
+# cd /d3llm/d3llm_DREAM/distill_1_data_prepare
 # chmod +x run_generate_1node_4gpu.sh
 # ./run_generate_1node_4gpu.sh
