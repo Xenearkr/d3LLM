@@ -262,7 +262,6 @@ def generate_teacher_model_trajectory(
 
         if trajectory_one_step:
             trajectory.append(unmask_time)
-            trajectory.append(x.clone())
         from d3llm.d3llm_DREAM.d3llm_dream_generate_util import DreamModelOutput
         if return_dict_in_generate:
             return DreamModelOutput(sequences=x, history=histories), i
@@ -458,7 +457,7 @@ def main(
             # Store result: convert tensors to lists for JSON serialization
             processed_trajectory = []
             if trajectory_one_step:
-                processed_trajectory = [trajectory[0].cpu().tolist(), trajectory[1].cpu().tolist()]
+                processed_trajectory = trajectory[0].cpu().tolist()
             else:
                 processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
 
