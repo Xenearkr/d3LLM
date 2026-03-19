@@ -338,72 +338,128 @@ def main(
     if max_data_num > 0:
         end_idx = min(end_idx, start_idx + max_data_num)
 
-    results = []
-    total_count = 0
-    incorrect_count = 0
+    def _load_existing_records(path):
+        """Load existing records from JSON array or JSONL file."""
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return [], None
+
+        # Detect format by first non-whitespace char
+        with open(path, "r", encoding="utf-8") as f:
+            head = ""
+            while True:
+                ch = f.read(1)
+                if not ch:
+                    break
+                if not ch.isspace():
+                    head = ch
+                    break
+
+        records = []
+        if head == "[":
+            # legacy json array
+            with open(path, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = []
+            if isinstance(data, list):
+                records = [x for x in data if isinstance(x, dict)]
+            return records, "json_array"
+
+        # jsonl
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        records.append(obj)
+                except json.JSONDecodeError:
+                    continue
+        return records, "jsonl"
+
+    existing_records, existing_format = _load_existing_records(output_file)
+    processed_idx = {int(r["idx"]) for r in existing_records if "idx" in r}
+    print(f"Found {len(processed_idx)} existing records in {output_file}")
+
+    # Convert legacy json array file to jsonl for append-friendly persistence
+    if existing_format == "json_array":
+        with open(output_file, "w", encoding="utf-8") as f:
+            for rec in existing_records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"Converted legacy JSON array to JSONL at {output_file}")
+
+    total_count = len(processed_idx)
+    incorrect_count = sum(1 for r in existing_records if r.get("is_correct") is False)
+    new_count = 0
     
-    for idx in tqdm(
-        range(start_idx, min(end_idx, len(dataset))), desc="Generating trajectories"
-    ):
-        sample = dataset[idx]
-        prompt_text = sample["question"]
-        ground_truth = sample.get("gt_answer", None)
+    with open(output_file, "a", encoding="utf-8") as out_f:
+        for idx in tqdm(
+            range(start_idx, min(end_idx, len(dataset))), desc="Generating trajectories"
+        ):
+            if idx in processed_idx:
+                continue
+            sample = dataset[idx]
+            prompt_text = sample["question"]
+            ground_truth = sample.get("gt_answer", None)
 
-        # Prepare messages for chat template
-        messages = [
-            {"role": "user", "content": prompt_text}
-        ]
+            # Prepare messages for chat template
+            messages = [
+                {"role": "user", "content": prompt_text}
+            ]
         
-        # Apply chat template
-        inputs = tokenizer.apply_chat_template(
-            messages, return_tensors="pt", return_dict=True, add_generation_prompt=True
-        )
-        input_ids = inputs.input_ids.to(device=device)
-        attention_mask = inputs.attention_mask.to(device=device)
-        
-        # Store prompt_ids as list
-        prompt_ids = input_ids[0].cpu().tolist()
-
-        # Retry mechanism: try up to 5 times if answer is incorrect
-        # Temperature increases: 0.0, 0.1, 0.2, 0.3, 0.4
-        max_attempts = 5
-        for attempt in range(max_attempts):
-            current_temperature = attempt * 0.1
-            
-            # Generate trajectory
-            final_output, trajectory, nfe = generate_teacher_model_trajectory(
-                teacher_model,
-                tokenizer,
-                input_ids,
-                attention_mask=attention_mask,
-                steps=steps,
-                gen_length=gen_length,
-                block_length=block_length,
-                temperature=current_temperature,
-                threshold=-float('inf'),
-                trajectory_one_step=trajectory_one_step,
+            # Apply chat template
+            inputs = tokenizer.apply_chat_template(
+                messages, return_tensors="pt", return_dict=True, add_generation_prompt=True
             )
+            input_ids = inputs.input_ids.to(device=device)
+            attention_mask = inputs.attention_mask.to(device=device)
+        
+            # Store prompt_ids as list
+            prompt_ids = input_ids[0].cpu().tolist()
 
-            # Decode generated text and check correctness
-            generated_text = tokenizer.decode(final_output[0], skip_special_tokens=True)
-            llm_answer = extract_boxed_answer(generated_text)
-            # is_correct = check_answer_correctness(generated_text, ground_truth)
-            is_correct = True   # TODO: default to be True for now
+            # Retry mechanism: try up to 5 times if answer is incorrect
+            # Temperature increases: 0.0, 0.1, 0.2, 0.3, 0.4
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                current_temperature = attempt * 0.1
             
-            # If correct or this is the last attempt, break
-            if is_correct or attempt == max_attempts - 1:
-                break
-            
-            print(f"Attempt {attempt + 1}/{max_attempts} failed for idx {idx} (temperature={current_temperature:.1f}), retrying...", flush=True)
+                # Generate trajectory
+                final_output, trajectory, nfe = generate_teacher_model_trajectory(
+                    teacher_model,
+                    tokenizer,
+                    input_ids,
+                    attention_mask=attention_mask,
+                    steps=steps,
+                    gen_length=gen_length,
+                    block_length=block_length,
+                    temperature=current_temperature,
+                    threshold=-float('inf'),
+                    trajectory_one_step=trajectory_one_step,
+                )
 
-        # Store result: convert tensors to lists for JSON serialization
-        processed_trajectory = []
-        if trajectory_one_step:
-            processed_trajectory=[trajectory[0].cpu().tolist(), trajectory[1].cpu().tolist()]
-        else:
-            processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
-        results.append(
-            {
+                # Decode generated text and check correctness
+                generated_text = tokenizer.decode(final_output[0], skip_special_tokens=True)
+                llm_answer = extract_boxed_answer(generated_text)
+                # is_correct = check_answer_correctness(generated_text, ground_truth)
+                is_correct = True   # TODO: default to be True for now
+            
+                # If correct or this is the last attempt, break
+                if is_correct or attempt == max_attempts - 1:
+                    break
+            
+                print(f"Attempt {attempt + 1}/{max_attempts} failed for idx {idx} (temperature={current_temperature:.1f}), retrying...", flush=True)
+
+            # Store result: convert tensors to lists for JSON serialization
+            processed_trajectory = []
+            if trajectory_one_step:
+                processed_trajectory = [trajectory[0].cpu().tolist(), trajectory[1].cpu().tolist()]
+            else:
+                processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
+
+            result_obj = {
                 "idx": idx,
                 "question": prompt_text,
                 "prompt_ids": prompt_ids,
@@ -415,27 +471,29 @@ def main(
                 "is_correct": is_correct,
                 "nfe": nfe,
             }
-        )
-        
-        # Update statistics and print real-time status
-        total_count += 1
-        if not is_correct:
-            incorrect_count += 1
-        
-        correct_count = total_count - incorrect_count
-        accuracy = (correct_count / total_count * 100) if total_count > 0 else 0
-        error_rate = (incorrect_count / total_count * 100) if total_count > 0 else 0
-        
-        if total_count % 10 == 0:
-            print(f"[idx {idx}] Status: {'✓ Correct' if is_correct else '✗ Incorrect'} | "
-                f"Total: {total_count} | Correct: {correct_count} ({accuracy:.2f}%) | "
-                f"Incorrect: {incorrect_count} ({error_rate:.2f}%)", flush=True)
 
-    # Save results
-    with open(output_file, "w") as f:
-        json.dump(results, f)
+            # Persist each sample immediately (JSONL append) for crash-safe resume
+            out_f.write(json.dumps(result_obj, ensure_ascii=False) + "\n")
+            out_f.flush()
+            os.fsync(out_f.fileno())
+            processed_idx.add(idx)
+            new_count += 1
+        
+            # Update statistics and print real-time status
+            total_count += 1
+            if not is_correct:
+                incorrect_count += 1
+        
+            correct_count = total_count - incorrect_count
+            accuracy = (correct_count / total_count * 100) if total_count > 0 else 0
+            error_rate = (incorrect_count / total_count * 100) if total_count > 0 else 0
+        
+            if total_count % 10 == 0:
+                print(f"[idx {idx}] Status: {'✓ Correct' if is_correct else '✗ Incorrect'} | "
+                    f"Total: {total_count} | Correct: {correct_count} ({accuracy:.2f}%) | "
+                    f"Incorrect: {incorrect_count} ({error_rate:.2f}%)", flush=True)
 
-    print(f"Saved {len(results)} trajectories to {output_file}")
+    print(f"Appended {new_count} new trajectories to {output_file} (total now: {len(processed_idx)})")
 
 
 if __name__ == "__main__":

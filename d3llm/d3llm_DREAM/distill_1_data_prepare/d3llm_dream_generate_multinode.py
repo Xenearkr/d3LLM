@@ -63,7 +63,7 @@ def main(
     gpu_id = slurm_procid  # Use global rank as gpu_id
     start_idx = gpu_id * chunk_size
     end_idx = min((gpu_id + 1) * chunk_size, total_size)
-    output_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.json")
+    output_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.jsonl")
 
     # Run generation on this GPU
     cmd = [
@@ -92,6 +92,9 @@ def main(
     env["CUDA_VISIBLE_DEVICES"] = str(slurm_localid)
 
     print(f"GPU {gpu_id}: Processing indices {start_idx}-{end_idx}")
+    completion_file = os.path.join(output_dir, f"completed_{gpu_id}.flag")
+    if os.path.exists(completion_file):
+        os.remove(completion_file)
     result = subprocess.run(cmd, env=env)
     
     if result.returncode != 0:
@@ -102,7 +105,6 @@ def main(
 
     # Barrier: wait for all tasks to complete
     # Create a completion flag for this task
-    completion_file = os.path.join(output_dir, f"completed_{gpu_id}.flag")
     with open(completion_file, "w") as f:
         f.write("done")
     
@@ -122,15 +124,51 @@ def main(
         
         print("All tasks completed. Concatenating results...")
         
+        def _load_part_records(part_file):
+            """Load records from JSONL (preferred) or legacy JSON array."""
+            if not os.path.exists(part_file) or os.path.getsize(part_file) == 0:
+                return []
+
+            with open(part_file, "r", encoding="utf-8") as f:
+                head = ""
+                while True:
+                    ch = f.read(1)
+                    if not ch:
+                        break
+                    if not ch.isspace():
+                        head = ch
+                        break
+
+            if head == "[":
+                with open(part_file, "r", encoding="utf-8") as f:
+                    try:
+                        data = json.load(f)
+                    except json.JSONDecodeError:
+                        data = []
+                return data if isinstance(data, list) else []
+
+            records = []
+            with open(part_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict):
+                        records.append(obj)
+            return records
+
         # Concatenate results
         all_data = []
         for gpu_id in range(num_gpus):
-            part_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.json")
+            part_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.jsonl")
             if os.path.exists(part_file):
-                with open(part_file, "r") as f:
-                    data = json.load(f)
-                    all_data.extend(data)
-                    print(f"Loaded {len(data)} samples from GPU {gpu_id}")
+                data = _load_part_records(part_file)
+                all_data.extend(data)
+                print(f"Loaded {len(data)} samples from GPU {gpu_id}")
             else:
                 print(f"Warning: {part_file} not found")
 

@@ -8,7 +8,7 @@ STEPS=512
 GEN_LENGTH=512
 BLOCK_LENGTH=32
 OUTPUT_DIR="trajectory_data_1node_4gpu"
-MAX_DATA_NUM=4   # -1 表示不限数据量；可以改成比如 10000 先测试
+MAX_DATA_NUM=12   # -1 表示不限数据量；可以改成比如 10000 先测试
 TRAJECTORY_ONE_STEP=true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +20,9 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   PYTHON_BIN="python3"
 fi
+
+echo "[resume-mode] Existing outputs under ${OUTPUT_DIR} will be reused."
+echo "[resume-mode] Each generated sample is appended immediately; rerun continues from next unfinished idx."
 
 PIDS=()
 INTERRUPTED=0
