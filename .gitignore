@@ -26,6 +26,3 @@ null/
 *.log
 README_TRAINING.md
 DATASET_INFO.md
-setup_diffusion_llm_env.sh
-setup_env.sh
-requirements_temp.txt

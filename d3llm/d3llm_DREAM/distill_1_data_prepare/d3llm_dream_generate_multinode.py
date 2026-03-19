@@ -14,6 +14,7 @@ def main(
     output_dir="trajectory_output",
     max_data_num=-1,
     trajectory_one_step=False,
+    dataset_name="d3llm/Ling-Coder-dParallel-merged-512-120k",
 ):
     """Distributed trajectory generation for DREAM using multiple GPUs across multiple nodes"""
 
@@ -32,7 +33,7 @@ def main(
     if slurm_procid == 0:
         # Load dataset to get total size
         # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-        dataset = load_dataset("d3llm/Ling-Coder-dParallel-merged-512-120k", split="train")
+        dataset = load_dataset(dataset_name, split="train")
         total_size = len(dataset)
 
         # Apply max_data_num limit
@@ -58,11 +59,12 @@ def main(
     with open(total_size_file, "r") as f:
         total_size = int(f.read().strip())
     
-    # Calculate this task's chunk
-    chunk_size = (total_size + num_gpus - 1) // num_gpus
+    # Strided partition by modulo:
+    # gpu_id=0 -> 0, num_gpus, 2*num_gpus, ...
+    # gpu_id=1 -> 1, 1+num_gpus, ...
     gpu_id = slurm_procid  # Use global rank as gpu_id
-    start_idx = gpu_id * chunk_size
-    end_idx = min((gpu_id + 1) * chunk_size, total_size)
+    start_idx = gpu_id
+    end_idx = total_size
     output_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.jsonl")
 
     # Run generation on this GPU
@@ -83,6 +85,10 @@ def main(
         output_file,
         "--max_data_num",
         str(max_data_num),
+        "--stride",
+        str(num_gpus),
+        "--dataset_name",
+        dataset_name,
     ]
     if trajectory_one_step:
         cmd.append("--trajectory_one_step")
@@ -91,7 +97,7 @@ def main(
     # Use local GPU ID
     env["CUDA_VISIBLE_DEVICES"] = str(slurm_localid)
 
-    print(f"GPU {gpu_id}: Processing indices {start_idx}-{end_idx}")
+    print(f"GPU {gpu_id}: Processing strided indices start={start_idx}, stride={num_gpus}, end<{end_idx}")
     completion_file = os.path.join(output_dir, f"completed_{gpu_id}.flag")
     if os.path.exists(completion_file):
         os.remove(completion_file)
@@ -219,6 +225,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Only save the trajectory of one step"
     )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default="d3llm/Ling-Coder-dParallel-merged-512-120k",
+        help="HF dataset ID used by both scheduler and workers.",
+    )
     args = parser.parse_args()
 
     main(
@@ -229,4 +241,5 @@ if __name__ == "__main__":
         args.output_dir,
         args.max_data_num,
         args.trajectory_one_step,
+        args.dataset_name,
     )

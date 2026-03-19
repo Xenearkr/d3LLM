@@ -310,6 +310,8 @@ def main(
     output_file="trajectory_data.json",
     max_data_num=-1,
     trajectory_one_step=False,
+    stride=1,
+    dataset_name="d3llm/Ling-Coder-dParallel-merged-512-120k",
 ):
     from datasets import load_dataset
     from tqdm import tqdm
@@ -332,11 +334,11 @@ def main(
 
     # Load dataset
     # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-    dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
+    dataset = load_dataset(dataset_name, split="train")
 
-    # Apply max_data_num limit
+    # Apply max_data_num limit against global dataset prefix [0, max_data_num)
     if max_data_num > 0:
-        end_idx = min(end_idx, start_idx + max_data_num)
+        end_idx = min(end_idx, max_data_num)
 
     def _load_existing_records(path):
         """Load existing records from JSON array or JSONL file."""
@@ -397,7 +399,8 @@ def main(
     
     with open(output_file, "a", encoding="utf-8") as out_f:
         for idx in tqdm(
-            range(start_idx, min(end_idx, len(dataset))), desc="Generating trajectories"
+            range(start_idx, min(end_idx, len(dataset)), max(1, stride)),
+            desc="Generating trajectories",
         ):
             if idx in processed_idx:
                 continue
@@ -517,6 +520,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Only save the trajectory of one step"
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="Index stride. Use stride=num_gpus with start_idx=gpu_id for modulo partition.",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default="d3llm/Ling-Coder-dParallel-merged-512-120k",
+        help="HF dataset ID for trajectory generation.",
+    )
     args = parser.parse_args()
 
     main(
@@ -528,4 +543,6 @@ if __name__ == "__main__":
         args.output_file,
         args.max_data_num,
         args.trajectory_one_step,
+        args.stride,
+        args.dataset_name,
     )
