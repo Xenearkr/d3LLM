@@ -390,6 +390,7 @@ def main(
     output_file="trajectory_data.json",
     max_data_num=-1,
     trajectory_one_step=False,
+    stride=1,
 ):
     from datasets import load_dataset
     from tqdm import tqdm
@@ -402,7 +403,7 @@ def main(
     # model_path = "Dream-org/Dream-Coder-v0-Instruct-7B"
     teacher_model = AutoModel.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
     ).to(device).eval()
 
@@ -416,18 +417,75 @@ def main(
     # dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
     dataset = load_dataset("xlangai/DS-1000", split="test")
 
-    # Apply max_data_num limit
+    # Apply max_data_num limit against global prefix [0, max_data_num)
     if max_data_num > 0:
-        end_idx = min(end_idx, start_idx + max_data_num)
+        end_idx = min(end_idx, max_data_num)
 
-    results = []
-    total_count = 0
-    incorrect_count = 0
+    def _load_existing_records(path: str):
+        """Load existing records from JSON array or JSONL file.
+        Returns (records, existing_format) where existing_format is 'json_array' or 'jsonl'.
+        """
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return [], None
+
+        # Detect format by first non-whitespace char
+        with open(path, "r", encoding="utf-8") as f:
+            head = ""
+            while True:
+                ch = f.read(1)
+                if not ch:
+                    break
+                if not ch.isspace():
+                    head = ch
+                    break
+
+        if head == "[":
+            with open(path, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = []
+            records = data if isinstance(data, list) else []
+            return records, "json_array"
+
+        # Assume JSONL (one json object per line)
+        records = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    records.append(obj)
+        return records, "jsonl"
+
+    existing_records, existing_format = _load_existing_records(output_file)
+    processed_idx = {int(r["idx"]) for r in existing_records if "idx" in r}
+
+    # Convert legacy JSON array to JSONL for append-friendly resume
+    if existing_format == "json_array":
+        with open(output_file, "w", encoding="utf-8") as f:
+            for rec in existing_records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    total_count = len(processed_idx)
+    incorrect_count = sum(1 for r in existing_records if r.get("is_correct") is False)
+    new_count = 0
+
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    out_f = open(output_file, "a", encoding="utf-8")
 
     for idx in tqdm(
-        range(start_idx, min(end_idx, len(dataset))),
+        range(start_idx, min(end_idx, len(dataset)), max(1, stride)),
         desc="Generating trajectories",
     ):
+        if idx in processed_idx:
+            continue
+
         sample = dataset[idx]
         prompt_text = sample["prompt"]
         ground_truth = sample.get(
@@ -518,25 +576,29 @@ def main(
             processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
 
         # 注意：输出字段接口保持不变
-        results.append(
-            {
-                "idx": idx,
-                "question": prompt_text,  # 实为 prompt；字段名保持不变
-                "prompt_ids": prompt_ids,
-                "trajectory": processed_trajectory,
-                "final_output": final_output[0].cpu().tolist(),
-                "generated_text": generated_text,  # 原始完整解码文本
-                "llm_answer": llm_answer,  # 清洗后的 assistant 有效输出
-                "gt_answer": ground_truth,  # 实为 reference_code；字段名保持不变
-                "is_correct": is_correct,
-                "nfe": nfe,
-            }
-        )
+        result_obj = {
+            "idx": idx,
+            "question": prompt_text,  # 实为 prompt；字段名保持不变
+            "prompt_ids": prompt_ids,
+            "trajectory": processed_trajectory,
+            "final_output": final_output[0].cpu().tolist(),
+            "generated_text": generated_text,  # 原始完整解码文本
+            "llm_answer": llm_answer,  # 清洗后的 assistant 有效输出
+            "gt_answer": ground_truth,  # 实为 reference_code；字段名保持不变
+            "is_correct": is_correct,
+            "nfe": nfe,
+        }
 
-        # Update statistics and print real-time status
+        # Persist each sample immediately (crash-safe resume)
+        out_f.write(json.dumps(result_obj, ensure_ascii=False) + "\n")
+        out_f.flush()
+        os.fsync(out_f.fileno())
+
         total_count += 1
+        new_count += 1
         if not is_correct:
             incorrect_count += 1
+        processed_idx.add(idx)
 
         correct_count = total_count - incorrect_count
         accuracy = (correct_count / total_count * 100) if total_count > 0 else 0
@@ -550,11 +612,10 @@ def main(
                 flush=True,
             )
 
-    # Save results
-    with open(output_file, "w") as f:
-        json.dump(results, f)
-
-    print(f"Saved {len(results)} trajectories to {output_file}")
+    out_f.close()
+    print(
+        f"Appended {new_count} new trajectories to {output_file} (total now: {len(processed_idx)})"
+    )
 
 
 if __name__ == "__main__":
@@ -578,6 +639,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Only save the trajectory of one step",
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="Index stride. Use stride=num_gpus with start_idx=gpu_id for modulo partition.",
+    )
     args = parser.parse_args()
 
     main(
@@ -589,4 +656,5 @@ if __name__ == "__main__":
         args.output_file,
         args.max_data_num,
         args.trajectory_one_step,
+        args.stride,
     )

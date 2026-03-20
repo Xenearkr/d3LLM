@@ -58,12 +58,17 @@ def main(
     with open(total_size_file, "r") as f:
         total_size = int(f.read().strip())
     
-    # Calculate this task's chunk
-    chunk_size = (total_size + num_gpus - 1) // num_gpus
+    # Strided partition by modulo:
+    # gpu_id=0 -> 0, num_gpus, 2*num_gpus, ...
+    # gpu_id=1 -> 1, 1+num_gpus, ...
     gpu_id = slurm_procid  # Use global rank as gpu_id
-    start_idx = gpu_id * chunk_size
-    end_idx = min((gpu_id + 1) * chunk_size, total_size)
+    start_idx = gpu_id
+    end_idx = total_size
     output_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.json")
+    completion_file = os.path.join(output_dir, f"completed_{gpu_id}.flag")
+    # Resume fix: remove stale completion flags from previous interrupted runs
+    if os.path.exists(completion_file):
+        os.remove(completion_file)
 
     # Run generation on this GPU
     cmd = [
@@ -83,6 +88,8 @@ def main(
         output_file,
         "--max_data_num",
         str(max_data_num),
+        "--stride",
+        str(num_gpus),
     ]
     if trajectory_one_step:
         cmd.append("--trajectory_one_step")
@@ -91,7 +98,7 @@ def main(
     # Use local GPU ID
     env["CUDA_VISIBLE_DEVICES"] = str(slurm_localid)
 
-    print(f"GPU {gpu_id}: Processing indices {start_idx}-{end_idx}")
+    print(f"GPU {gpu_id}: Processing strided indices start={start_idx}, stride={num_gpus}, end<{end_idx}")
     result = subprocess.run(cmd, env=env)
     
     if result.returncode != 0:
@@ -102,7 +109,6 @@ def main(
 
     # Barrier: wait for all tasks to complete
     # Create a completion flag for this task
-    completion_file = os.path.join(output_dir, f"completed_{gpu_id}.flag")
     with open(completion_file, "w") as f:
         f.write("done")
     
@@ -126,13 +132,50 @@ def main(
         all_data = []
         for gpu_id in range(num_gpus):
             part_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.json")
-            if os.path.exists(part_file):
-                with open(part_file, "r") as f:
-                    data = json.load(f)
-                    all_data.extend(data)
-                    print(f"Loaded {len(data)} samples from GPU {gpu_id}")
-            else:
-                print(f"Warning: {part_file} not found")
+            if not os.path.exists(part_file) or os.path.getsize(part_file) == 0:
+                print(f"Warning: {part_file} not found/empty")
+                continue
+
+            def _load_part_records(p):
+                """Load JSON array (legacy) or JSONL (preferred) into list[dict]."""
+                with open(p, "r", encoding="utf-8") as f:
+                    head = ""
+                    while True:
+                        ch = f.read(1)
+                        if not ch:
+                            break
+                        if not ch.isspace():
+                            head = ch
+                            break
+
+                if head == "[":
+                    with open(p, "r", encoding="utf-8") as f2:
+                        try:
+                            data_arr = json.load(f2)
+                        except json.JSONDecodeError:
+                            data_arr = []
+                    return data_arr if isinstance(data_arr, list) else []
+
+                records = []
+                with open(p, "r", encoding="utf-8") as f2:
+                    for line in f2:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(obj, dict):
+                            records.append(obj)
+                return records
+
+            data = _load_part_records(part_file)
+            all_data.extend(data)
+            print(f"Loaded {len(data)} samples from GPU {gpu_id}")
+
+        # Ensure deterministic order by idx
+        all_data.sort(key=lambda d: d.get("idx", -1))
 
         # Convert to dataset format with correctness check
         dataset_dict = {
