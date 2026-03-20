@@ -399,8 +399,8 @@ def main(
     device = "cuda"
 
     # Load DREAM teacher model
-    model_path = "Dream-org/Dream-v0-Instruct-7B"
-    # model_path = "Dream-org/Dream-Coder-v0-Instruct-7B"
+    # model_path = "Dream-org/Dream-v0-Instruct-7B"
+    model_path = "Dream-org/Dream-Coder-v0-Instruct-7B"
     teacher_model = AutoModel.from_pretrained(
         model_path,
         dtype=torch.bfloat16,
