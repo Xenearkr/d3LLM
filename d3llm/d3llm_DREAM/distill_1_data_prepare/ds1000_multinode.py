@@ -128,56 +128,78 @@ def main(
         
         print("All tasks completed. Concatenating results...")
         
-        # Concatenate results
-        all_data = []
+        def _load_part_records(p):
+            """Load JSON array (legacy) or JSONL (preferred) into list[dict]."""
+            with open(p, "r", encoding="utf-8") as f:
+                head = ""
+                while True:
+                    ch = f.read(1)
+                    if not ch:
+                        break
+                    if not ch.isspace():
+                        head = ch
+                        break
+
+            if head == "[":
+                with open(p, "r", encoding="utf-8") as f2:
+                    try:
+                        data_arr = json.load(f2)
+                    except json.JSONDecodeError:
+                        data_arr = []
+                return data_arr if isinstance(data_arr, list) else []
+
+            records = []
+            with open(p, "r", encoding="utf-8") as f2:
+                for line in f2:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict):
+                        records.append(obj)
+            return records
+
+        # Round-robin merge to preserve global idx order:
+        # rank0: idx=0,N,2N,... ; rank1: idx=1,N+1,... etc
+        # Taking i-th element from each rank in order gives idx=0,1,2,3,4,5...
+        parts = []
+        max_len = 0
         for gpu_id in range(num_gpus):
             part_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.json")
             if not os.path.exists(part_file) or os.path.getsize(part_file) == 0:
                 print(f"Warning: {part_file} not found/empty")
+                parts.append([])
                 continue
 
-            def _load_part_records(p):
-                """Load JSON array (legacy) or JSONL (preferred) into list[dict]."""
-                with open(p, "r", encoding="utf-8") as f:
-                    head = ""
-                    while True:
-                        ch = f.read(1)
-                        if not ch:
-                            break
-                        if not ch.isspace():
-                            head = ch
-                            break
-
-                if head == "[":
-                    with open(p, "r", encoding="utf-8") as f2:
-                        try:
-                            data_arr = json.load(f2)
-                        except json.JSONDecodeError:
-                            data_arr = []
-                    return data_arr if isinstance(data_arr, list) else []
-
-                records = []
-                with open(p, "r", encoding="utf-8") as f2:
-                    for line in f2:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(obj, dict):
-                            records.append(obj)
-                return records
-
             data = _load_part_records(part_file)
-            all_data.extend(data)
             print(f"Loaded {len(data)} samples from GPU {gpu_id}")
+            parts.append(data)
+            max_len = max(max_len, len(data))
 
-        # Ensure deterministic order by idx
-        all_data.sort(key=lambda d: d.get("idx", -1))
+        all_data = []
+        seen_idx = set()
+        for i in range(max_len):
+            for gpu_id in range(num_gpus):
+                if i >= len(parts[gpu_id]):
+                    continue
+                rec = parts[gpu_id][i]
+                idx_val = rec.get("idx", None)
+                # Safety: skip duplicate idx if previous runs produced overlaps.
+                if idx_val is not None:
+                    try:
+                        idx_int = int(idx_val)
+                    except Exception:
+                        idx_int = None
+                    if idx_int is not None and idx_int in seen_idx:
+                        continue
+                    if idx_int is not None:
+                        seen_idx.add(idx_int)
+                all_data.append(rec)
 
-        # Convert to dataset format with correctness check
+        # Convert to dataset format with correctness check (order already fixed by round-robin)
         dataset_dict = {
             "idx": [d["idx"] for d in all_data],
             "question": [d["question"] for d in all_data],

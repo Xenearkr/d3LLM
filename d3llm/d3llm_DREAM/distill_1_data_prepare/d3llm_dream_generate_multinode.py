@@ -167,16 +167,40 @@ def main(
                         records.append(obj)
             return records
 
-        # Concatenate results
-        all_data = []
+        # Round-robin merge to preserve global idx order without sorting.
+        # Each rank uses modulo partition: idx = rank + k*num_gpus.
+        # Taking the i-th record from each rank in order gives: 0,1,2,3,4,5,...
+        parts = []
+        max_len = 0
         for gpu_id in range(num_gpus):
             part_file = os.path.join(output_dir, f"trajectory_part_{gpu_id}.jsonl")
-            if os.path.exists(part_file):
-                data = _load_part_records(part_file)
-                all_data.extend(data)
-                print(f"Loaded {len(data)} samples from GPU {gpu_id}")
-            else:
-                print(f"Warning: {part_file} not found")
+            if not os.path.exists(part_file) or os.path.getsize(part_file) == 0:
+                print(f"Warning: {part_file} not found/empty")
+                parts.append([])
+                continue
+            data = _load_part_records(part_file)
+            parts.append(data)
+            max_len = max(max_len, len(data))
+            print(f"Loaded {len(data)} samples from GPU {gpu_id}")
+
+        all_data = []
+        seen_idx = set()
+        for i in range(max_len):
+            for gpu_id in range(num_gpus):
+                if i >= len(parts[gpu_id]):
+                    continue
+                rec = parts[gpu_id][i]
+                idx_val = rec.get("idx", None)
+                if idx_val is not None:
+                    try:
+                        idx_int = int(idx_val)
+                    except Exception:
+                        idx_int = None
+                    if idx_int is not None and idx_int in seen_idx:
+                        continue
+                    if idx_int is not None:
+                        seen_idx.add(idx_int)
+                all_data.append(rec)
 
         # Convert to dataset format with correctness check
         dataset_dict = {
