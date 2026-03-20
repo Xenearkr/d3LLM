@@ -43,8 +43,8 @@ cleanup() {
   fi
 
   # 兜底：按脚本特征清理残留 Python 进程
-  pkill -f "d3llm_dream_generate_multinode.py.*--output_dir ${OUTPUT_DIR}" 2>/dev/null || true
-  pkill -f "d3llm_dream_generate_partly.py" 2>/dev/null || true
+  pkill -f "ds1000_multinode.py.*--output_dir ${OUTPUT_DIR}" 2>/dev/null || true
+  pkill -f "ds1000_partly.py" 2>/dev/null || true
 }
 
 on_interrupt() {
