@@ -230,7 +230,7 @@ def main(
             llm_answer = generated_code if generated_code.strip() else assistant_output
 
             if trajectory_one_step:
-                processed_trajectory = [trajectory[0].cpu().tolist(), trajectory[1].cpu().tolist()]
+                processed_trajectory = trajectory[0].cpu().tolist()
             else:
                 processed_trajectory = [traj[0].cpu().tolist() for traj in trajectory]
 
