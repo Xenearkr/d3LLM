@@ -8,7 +8,7 @@ STEPS=512
 GEN_LENGTH=512
 BLOCK_LENGTH=32
 OUTPUT_DIR="trajectory_data_1node_4gpu_ds1000"
-MAX_DATA_NUM=16   # -1 表示不限数据量；可以改成比如 10000 先测试
+MAX_DATA_NUM=-1   # -1 表示不限数据量；可以改成比如 10000 先测试
 TRAJECTORY_ONE_STEP=true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

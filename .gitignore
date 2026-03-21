@@ -9,7 +9,6 @@ evals_results/
 try.py
 trajectory_output/
 trajectory_data_1node_4gpu/
-trajectory_data_1node_4gpu_ds1000/
 output_model/
 output_models/
 sample_llada.json
@@ -25,5 +24,3 @@ coder_data/
 .gradio
 null/
 *.log
-README_TRAINING.md
-DATASET_INFO.md
