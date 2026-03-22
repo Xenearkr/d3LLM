@@ -43,6 +43,30 @@ def _load_part_records(p: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _normalize_trajectory_for_arrow(traj: Any) -> List[List[List[int]]]:
+    """Unify trajectory nesting so PyArrow can store one schema.
+
+    Some runs save each diffusion step as ``list[int]`` (2 levels); others wrap
+    a batch dimension as ``list[list[int]]`` (3 levels). Mixing both in the same
+    column triggers ``ArrowInvalid: cannot mix list and non-list, non-null values``.
+    """
+    if traj is None or not isinstance(traj, list):
+        return []
+    out: List[List[List[int]]] = []
+    for step in traj:
+        if not isinstance(step, list):
+            continue
+        if len(step) == 0:
+            out.append([[]])
+        elif isinstance(step[0], int):
+            out.append([step])
+        elif isinstance(step[0], list):
+            out.append(step)
+        else:
+            out.append([step])  # defensive: coerce odd leaves to a batch row
+    return out
+
+
 def main(
     num_gpus: int = 24,
     steps: int = 512,
@@ -195,7 +219,10 @@ def main(
             "idx": [d.get("idx", None) for d in all_data],
             "question": [d.get("question", "") for d in all_data],
             "prompt_ids": [d.get("prompt_ids", []) for d in all_data],
-            "trajectory": [d.get("trajectory", []) for d in all_data],
+            "trajectory": [
+                _normalize_trajectory_for_arrow(d.get("trajectory", []))
+                for d in all_data
+            ],
             "final_output": [d.get("final_output", []) for d in all_data],
             "generated_text": [d.get("generated_text", "") for d in all_data],
             "llm_answer": [d.get("llm_answer", "") for d in all_data],
