@@ -43,27 +43,28 @@ def _load_part_records(p: str) -> List[Dict[str, Any]]:
     return records
 
 
-def _normalize_trajectory_for_arrow(traj: Any) -> List[List[List[int]]]:
-    """Unify trajectory nesting so PyArrow can store one schema.
+def _normalize_trajectory_for_arrow(traj: Any) -> List[List[int]]:
+    """Unify trajectory nesting so PyArrow can store one schema (2 levels: step → tokens).
 
-    Some runs save each diffusion step as ``list[int]`` (2 levels); others wrap
-    a batch dimension as ``list[list[int]]`` (3 levels). Mixing both in the same
-    column triggers ``ArrowInvalid: cannot mix list and non-list, non-null values``.
+    JSONL may mix per-step shapes: ``list[int]`` (tokens) or ``list[list[int]]``
+    (batch=1 wrapper). Both are collapsed to ``list[int]`` per step so the Arrow
+    column is ``Sequence(Sequence(int64))``, matching DS1000-style datasets.
     """
     if traj is None or not isinstance(traj, list):
         return []
-    out: List[List[List[int]]] = []
+    out: List[List[int]] = []
     for step in traj:
         if not isinstance(step, list):
             continue
         if len(step) == 0:
-            out.append([[]])
+            out.append([])
         elif isinstance(step[0], int):
-            out.append([step])
-        elif isinstance(step[0], list):
             out.append(step)
+        elif isinstance(step[0], list):
+            # Drop singleton batch dimension: [[tok, ...]] → [tok, ...]
+            out.append(step[0])
         else:
-            out.append([step])  # defensive: coerce odd leaves to a batch row
+            out.append([])
     return out
 
 
