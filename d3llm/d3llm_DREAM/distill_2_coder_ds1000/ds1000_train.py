@@ -143,92 +143,33 @@ def prepare_model(config: Dict[str, Any]):
     return model, tokenizer
 
 
-def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, block_start, block_end):
-    """
-    Generate the mask pattern for the current block from a decode-order trajectory.
+def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, mask_start, mask_end):
 
-    New trajectory format:
-        decode_order: List[int]
-            A single sequence of decoding ranks for the response region.
-            - 0 means prompt / non-generation region / ignored position
-            - positive integers mean the relative decoding order
-              (smaller -> decoded earlier, larger -> decoded later)
-
-    Core idea:
-        We no longer "select a trajectory step" from multiple full-sequence snapshots.
-        Instead, we directly derive the current block's mask pattern from decode_order.
-
-        For the current block:
-        - tokens with smaller decode ranks should be treated as earlier-decoded
-          -> more likely to stay unmasked
-        - tokens with larger decode ranks should be treated as later-decoded
-          -> more likely to be masked
-
-    Args:
-        decode_order: List[int]
-            Decode-order sequence for the current sample.
-        mask_ratio: float
-            Target mask ratio in [0, 1].
-        mask_token_id: int
-            Kept only for API compatibility; not used in the new logic.
-        block_start: int
-            Start index of the current block, in RESPONSE-RELATIVE coordinates.
-        block_end: int
-            End index of the current block, in RESPONSE-RELATIVE coordinates.
-
-    Returns:
-        List[bool]:
-            seg_mask for the current block.
-            True  -> this position should be masked
-            False -> this position should remain visible
-    """
-    # Empty trajectory: let caller fall back to random masking
     if not decode_order:
         return None # not here
 
-    # Defensive clipping to avoid out-of-range slicing
-    block_start = max(0, block_start)
-    block_end = min(block_end, len(decode_order))
-
-    if block_end <= block_start:
-        return None # not here
-
-    # Current block's decode-order values
-    block_orders = decode_order[block_start:block_end]
+    block_orders = decode_order[mask_start:mask_end]
     block_len = len(block_orders)
-    
+
     # --------------------------------------------------------------------------------------
     # print(f"decoder: {decode_order}")
     # print(f"mask_ratio: {mask_ratio}, block_start: {block_start}, block_end:{block_end}")
     # print(f"block_orders: {block_orders}")
     # --------------------------------------------------------------------------------------
 
-    # Valid generation positions are those with positive decode order.
-    # order == 0 means prompt / ignored / non-generation position.
     valid_positions = [(idx, order) for idx, order in enumerate(block_orders) if order > 0]
 
-    # If this block has no valid generation positions, do not mask anything here.
     if len(valid_positions) == 0:
         print("len(valid_positions) == 0")
         return [False] * block_len
 
-    # Number of valid positions to keep unmasked in this block.
-    # Example:
-    #   mask_ratio = 0.75 -> keep 25% earliest-decoded tokens visible
     num_valid = len(valid_positions)
     num_unmasked = int((1 - mask_ratio) * num_valid)
     num_unmasked = max(0, min(num_unmasked, num_valid))
 
-    # Sort valid positions by decode rank:
-    # smaller order = decoded earlier = should be visible first
     valid_positions_sorted = sorted(valid_positions, key=lambda x: x[1])
-
-    # Keep the earliest-decoded num_unmasked positions visible
     visible_pos = set(idx for idx, _ in valid_positions_sorted[:num_unmasked])
 
-    # Build seg_mask for the block
-    # - invalid positions (order == 0) are never masked here
-    # - valid positions not in visible_pos are masked
     seg_mask = []
     for idx, order in enumerate(block_orders):
         if order <= 0:
@@ -289,9 +230,17 @@ def forward_process_with_trajectory(
     b, l = input_ids.shape
     device = input_ids.device
 
+    assert b == 1
+
+    print(f"input_ids: {input_ids}")
+    print(f"decode_order: {trajectory_batch[0]}")
+
+    first_nonzero = next((idx for idx, x in enumerate(trajectory_batch[0]) if x != 0), len(trajectory_batch[0]))
+    print(f"len1={len(input_ids[0])}; prefix_zero_len={first_nonzero}; len2={len(trajectory_batch[0])}")
+
     noisy_batch = input_ids.clone()
     noisy_batch_rev = input_ids.clone() if use_complementary_loss else None
-    masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
+    masked_indices = torch.zeros_like(input_ids, dtype=torch.bool) # 同形全0矩阵
     masked_indices_rev = torch.zeros_like(input_ids, dtype=torch.bool) if use_complementary_loss else None
 
     # Never mask prompt region
@@ -302,35 +251,38 @@ def forward_process_with_trajectory(
     if use_complementary_loss:
         noisy_batch_rev[prompt_mask] = input_ids[prompt_mask]
 
-    for i in range(b):
+    for i in range(b): # b 恒为 1
         prompt_len = prompt_lengths[i].item()
         response_len = l - prompt_len
+        print(f"prompt_len: {prompt_len}; response_len: {response_len}") # 77， 18
 
         if response_len <= 0:
             continue
 
         # Choose current response region
         if use_blockwise:
-            max_blocks = response_len // block_size
-            num_blocks = random.randint(0, max_blocks)
-            mask_start = prompt_len + num_blocks * block_size
-            mask_end = mask_start + block_size if num_blocks < max_blocks else l
+            max_blocks = response_len // block_size # 18/32 = 0
+            num_blocks = random.randint(0, max_blocks) # 此处始终为0
+            mask_start = prompt_len + num_blocks * block_size # 77
+            mask_end = mask_start + block_size if num_blocks < max_blocks else l # 77 + 18 
         else:
-            mask_start = prompt_len
-            mask_end = l
+            mask_start = prompt_len # 77
+            mask_end = l # 77 + 18
 
         seg_len = mask_end - mask_start
-        block_start = mask_start - prompt_len   # response-relative  恒0
-        block_end = mask_end - prompt_len       # response-relative  恒16
+        # block_start = mask_start - prompt_len   # response-relative  恒0
+        # block_end = mask_end - prompt_len       # response-relative  恒16
+        print(mask_start, mask_end)
+        #-------------------------------------------------------------------------------------
 
         # Build seg_mask
         if use_naive_random_mask:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
         else:
-            decode_order = trajectory_batch[i]
+            decode_order = trajectory_batch[i] # 就这一个
             seg_mask_list = select_trajectory_by_ratio(
-                decode_order, mask_ratio, mask_token_id, block_start, block_end
+                decode_order, mask_ratio, mask_token_id, mask_start, mask_end
             )
 
             if seg_mask_list is None:
@@ -386,6 +338,7 @@ def forward_process_with_trajectory(
 
     if use_complementary_loss:
         return noisy_batch, noisy_batch_rev, masked_indices, masked_indices_rev
+
     return noisy_batch, masked_indices
 
 
@@ -586,6 +539,8 @@ class DLMTrainer(Trainer):
         # token shift
         masked_indices = masked_indices[:, 1:]
         masked_indices_rev = masked_indices_rev[:, 1:] if self.use_complementary_loss else None
+
+        assert masked_indices.any(), f"All masked_indices are False at global_step={self.state.global_step}"
         
         # compute logits
         outputs = model(input_ids=noisy_batch)
