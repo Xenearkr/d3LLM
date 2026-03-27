@@ -6,8 +6,8 @@
 用法（在项目根目录 d3LLM 下执行, YOUR_CHECKPOINT_PATH 需要替换为实际的 LoRA checkpoint 路径）:
   python merge_lora_dream.py \
     --base Dream-org/Dream-v0-Instruct-7B \
-    --lora_path output_model/d3LLM_DREAM_local_YOUR_CHECKPOINT_PATH/checkpoint-5742\
-    --output_dir output_model/merged_d3LLM_DREAM_5742
+    --lora_path output_model/d3LLM_ds1000_DREAM_Coder_local_0327_033955/checkpoint-160\
+    --output_dir output_model/merged_ds1000_v1
 
   # 使用国内镜像下载 base 时:
   HF_ENDPOINT=https://hf-mirror.com python merge_lora_dream.py --base ... --lora_path ... --output_dir ...

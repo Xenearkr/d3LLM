@@ -1,5 +1,6 @@
 # 使用说明
 # 选择性修改trajectory_dataset_path、output_dir的路径
+# 调参
 
 model:
     name: "Dream-org/Dream-Coder-v0-Instruct-7B"
@@ -9,8 +10,8 @@ model:
 training:
     output_dir: "output_model/d3LLM_ds1000_DREAM_Coder"
     num_train_epochs: 5 # 3 增大：小数据集多看几遍
-    gradient_accumulation_steps: 2 # 4 减小：更新更频繁一些
-    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 8 # 4 减小：更新更频繁一些
+    per_device_train_batch_size: 1
     logging_steps: 10
     learning_rate: 0.000002
     weight_decay: 0.01
