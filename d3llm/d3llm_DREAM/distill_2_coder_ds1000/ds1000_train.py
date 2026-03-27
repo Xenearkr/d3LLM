@@ -130,33 +130,93 @@ def prepare_model(config: Dict[str, Any]):
     return model, tokenizer
 
 
-def select_trajectory_by_ratio(trajectories, mask_ratio, mask_token_id, block_start, block_end):
-    """Select the trajectory step with mask ratio closest to target mask ratio in the current block
-    
-    Args:
-        trajectories: List of trajectory steps (each step is a full sequence)
-        mask_ratio: Target mask ratio [0, 1]
-        mask_token_id: ID of the mask token (not used, kept for API compatibility)
-        block_start: Start index of current block
-        block_end: End index of current block
-    
-    Returns:
-        The trajectory step with the closest mask ratio in the specified block region
+def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, block_start, block_end):
     """
-    if not trajectories or len(trajectories) == 0:
+    Generate the mask pattern for the current block from a decode-order trajectory.
+
+    New trajectory format:
+        decode_order: List[int]
+            A single sequence of decoding ranks for the response region.
+            - 0 means prompt / non-generation region / ignored position
+            - positive integers mean the relative decoding order
+              (smaller -> decoded earlier, larger -> decoded later)
+
+    Core idea:
+        We no longer "select a trajectory step" from multiple full-sequence snapshots.
+        Instead, we directly derive the current block's mask pattern from decode_order.
+
+        For the current block:
+        - tokens with smaller decode ranks should be treated as earlier-decoded
+          -> more likely to stay unmasked
+        - tokens with larger decode ranks should be treated as later-decoded
+          -> more likely to be masked
+
+    Args:
+        decode_order: List[int]
+            Decode-order sequence for the current sample.
+        mask_ratio: float
+            Target mask ratio in [0, 1].
+        mask_token_id: int
+            Kept only for API compatibility; not used in the new logic.
+        block_start: int
+            Start index of the current block, in RESPONSE-RELATIVE coordinates.
+        block_end: int
+            End index of the current block, in RESPONSE-RELATIVE coordinates.
+
+    Returns:
+        List[bool]:
+            seg_mask for the current block.
+            True  -> this position should be masked
+            False -> this position should remain visible
+    """
+    # Empty trajectory: let caller fall back to random masking
+    if not decode_order:
         return None
-    
-    # Trajectories are ordered by denoising steps (from fully masked to clean)
-    # Calculate the target number of unmasked tokens in the current block
-    block_length = block_end - block_start
-    num_unmasked = int((1 - mask_ratio) * block_length)
-    
-    # Map to trajectory index: earlier steps have more masks
-    # index = block_start + number of unmasked tokens so far
-    target_idx = block_start + num_unmasked
-    target_idx = min(target_idx, len(trajectories) - 1)
-    
-    return trajectories[target_idx]
+
+    # Defensive clipping to avoid out-of-range slicing
+    block_start = max(0, block_start)
+    block_end = min(block_end, len(decode_order))
+
+    if block_end <= block_start:
+        return None
+
+    # Current block's decode-order values
+    block_orders = decode_order[block_start:block_end]
+    block_len = len(block_orders)
+
+    # Valid generation positions are those with positive decode order.
+    # order == 0 means prompt / ignored / non-generation position.
+    valid_positions = [(idx, order) for idx, order in enumerate(block_orders) if order > 0]
+
+    # If this block has no valid generation positions, do not mask anything here.
+    if len(valid_positions) == 0:
+        return [False] * block_len
+
+    # Number of valid positions to keep unmasked in this block.
+    # Example:
+    #   mask_ratio = 0.75 -> keep 25% earliest-decoded tokens visible
+    num_valid = len(valid_positions)
+    num_unmasked = int((1 - mask_ratio) * num_valid)
+    num_unmasked = max(0, min(num_unmasked, num_valid))
+
+    # Sort valid positions by decode rank:
+    # smaller order = decoded earlier = should be visible first
+    valid_positions_sorted = sorted(valid_positions, key=lambda x: x[1])
+
+    # Keep the earliest-decoded num_unmasked positions visible
+    visible_pos = set(idx for idx, _ in valid_positions_sorted[:num_unmasked])
+
+    # Build seg_mask for the block
+    # - invalid positions (order == 0) are never masked here
+    # - valid positions not in visible_pos are masked
+    seg_mask = []
+    for idx, order in enumerate(block_orders):
+        if order <= 0:
+            seg_mask.append(False)
+        else:
+            seg_mask.append(idx not in visible_pos)
+
+    return seg_mask
 
 
 def naive_random_mask(trajectories, mask_ratio, mask_token_id, block_start, block_end):
@@ -176,37 +236,58 @@ def forward_process_with_trajectory(
     use_complementary_loss=False,
     eps=1e-3,
 ):
-    """Forward masking using teacher trajectories
-    
+    """
+    Forward masking using decode-order trajectories.
+
+    New trajectory format:
+        trajectory_batch[i] = decode_order  # List[int]
+    where:
+        - 0 means prompt / non-generation / ignored position
+        - positive integers indicate decoding order
+          (smaller -> decoded earlier, larger -> decoded later)
+
     Args:
-        use_blockwise: If True, only predict one block; otherwise random mask entire response
-        use_naive_random_mask: If True, use naive random masking baseline instead of trajectory selection
-        use_complementary_loss: If True, also return complementary masked batch for dParallel loss
+        input_ids: Tensor[b, l]
+        prompt_lengths: Tensor[b]
+        trajectory_batch: List[List[int]]
+        mask_token_id: mask token id
+        block_size: response block size when use_blockwise=True
+        mask_ratio: target mask ratio in current block
+        use_blockwise: whether to mask only one response block
+        use_naive_random_mask: whether to ignore trajectory and use random masking
+        use_complementary_loss: whether to also build complementary mask branch
+        eps: small smoothing factor for random masking fallback
+
+    Returns:
+        if use_complementary_loss:
+            noisy_batch, noisy_batch_rev, masked_indices, masked_indices_rev
+        else:
+            noisy_batch, masked_indices
     """
     b, l = input_ids.shape
     device = input_ids.device
-    
+
     noisy_batch = input_ids.clone()
     noisy_batch_rev = input_ids.clone() if use_complementary_loss else None
     masked_indices = torch.zeros_like(input_ids, dtype=torch.bool)
     masked_indices_rev = torch.zeros_like(input_ids, dtype=torch.bool) if use_complementary_loss else None
-    
-    # Protect prompt region from masking
+
+    # Never mask prompt region
     token_positions = torch.arange(l, device=device).expand(b, l)
     prompt_mask = token_positions < prompt_lengths.unsqueeze(1)
-    
+
     noisy_batch[prompt_mask] = input_ids[prompt_mask]
     if use_complementary_loss:
         noisy_batch_rev[prompt_mask] = input_ids[prompt_mask]
-    
+
     for i in range(b):
         prompt_len = prompt_lengths[i].item()
         response_len = l - prompt_len
-        
+
         if response_len <= 0:
             continue
-        
-        # Determine mask region
+
+        # Choose current response region
         if use_blockwise:
             max_blocks = response_len // block_size
             num_blocks = random.randint(0, max_blocks)
@@ -215,60 +296,50 @@ def forward_process_with_trajectory(
         else:
             mask_start = prompt_len
             mask_end = l
-        
-        # Get trajectory or use random masking
-        traj_fn = naive_random_mask if use_naive_random_mask else select_trajectory_by_ratio
-        traj_step = traj_fn(
-            trajectory_batch[i], mask_ratio, mask_token_id, mask_start - prompt_len, mask_end - prompt_len
-        )
-        
-        # Extract or generate seg_mask
+
         seg_len = mask_end - mask_start
-        if traj_step is not None:
-            traj_tensor = torch.tensor(traj_step, device=device, dtype=torch.long)
-            seg_mask = (traj_tensor[mask_start:mask_end] == mask_token_id)
-        else:
+        block_start = mask_start - prompt_len   # response-relative
+        block_end = mask_end - prompt_len       # response-relative
+
+        # Build seg_mask
+        if use_naive_random_mask:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
-        # print(f"[Debug] sample {i}, seg_mask: {seg_mask}")
-        # print(f"[Debug] sample {i}, seg_len: {seg_len}")
-        # print(f"[Debug] sample {i}, mask_start: {mask_start}")
-        # print(f"[Debug] sample {i}, mask_end: {mask_end}")
-        # print(f"[Debug] sample {i}, mask_ratio: {mask_ratio}")
-        # print(f"[Debug] sample {i}, prompt_len: {prompt_len}")
-        # print(f"[Debug] sample {i}, response_len: {response_len}")
-        # print(f"[Debug] sample {i}, len traj_step: {len(traj_step)}")
-        # print(f"[Debug] sample {i}, len trajectory_tensor: {len(traj_tensor)}")
+        else:
+            decode_order = trajectory_batch[i]
+            seg_mask_list = select_trajectory_by_ratio(
+                decode_order, mask_ratio, mask_token_id, block_start, block_end
+            )
 
-        # Apply mask (same logic as dream_train.py)
+            if seg_mask_list is None:
+                p_mask = (1 - eps) * mask_ratio + eps
+                seg_mask = torch.rand(seg_len, device=device) < p_mask
+            else:
+                seg_mask = torch.tensor(seg_mask_list, device=device, dtype=torch.bool)
+
+        # Apply block mask
         masked_indices[i, mask_start:mask_end] = seg_mask
         if use_complementary_loss:
             masked_indices_rev[i, mask_start:mask_end] = ~seg_mask
-        
+
         noisy_batch[i, mask_start:mask_end] = torch.where(
-            masked_indices[i, mask_start:mask_end], mask_token_id, input_ids[i, mask_start:mask_end]
+            masked_indices[i, mask_start:mask_end],
+            torch.full((seg_len,), mask_token_id, device=device, dtype=input_ids.dtype),
+            input_ids[i, mask_start:mask_end],
         )
+
         if use_complementary_loss:
             noisy_batch_rev[i, mask_start:mask_end] = torch.where(
-                masked_indices_rev[i, mask_start:mask_end], mask_token_id, input_ids[i, mask_start:mask_end]
+                masked_indices_rev[i, mask_start:mask_end],
+                torch.full((seg_len,), mask_token_id, device=device, dtype=input_ids.dtype),
+                input_ids[i, mask_start:mask_end],
             )
-        
-        # Mask future tokens
+
+        # Future tokens are fully masked
         noisy_batch[i, mask_end:l] = mask_token_id
         if use_complementary_loss:
             noisy_batch_rev[i, mask_end:l] = mask_token_id
 
-
-        # print(f"[Debug] sample {i}, total length:{l}")
-        # print(f"[Debug] sample {i}, prompt length:{prompt_len}")
-        # print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
-        # print(f"[Debug] sample {i}, mask_start:{mask_start}, mask_end:{mask_end}")
-        # print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
-        # print(f"[Debug] sample {i} masked_indices_rev: {sum(masked_indices_rev[i])}")
-        # print(f"[Debug] sample {i} Ratio of masks in noisy_batch: {sum(noisy_batch[i, mask_start:mask_end] == mask_token_id)}/{mask_end - mask_start}")
-        # print(f"[Debug] sample {i} Ratio of masks in noisy_batch_rev: {sum(noisy_batch_rev[i, mask_start:mask_end] == mask_token_id)}/{mask_end - mask_start}")
-        # print(f"[Debug] sample {i} ALL Ratio of masks in noisy_batch: {sum(noisy_batch[i, :] == mask_token_id)}/{len(noisy_batch[i, :])}")
-        # print(f"[Debug] sample {i} ALL Ratio of masks in noisy_batch_rev: {sum(noisy_batch_rev[i, :] == mask_token_id)}/{len(noisy_batch_rev[i, :])}")
     if use_complementary_loss:
         return noisy_batch, noisy_batch_rev, masked_indices, masked_indices_rev
     return noisy_batch, masked_indices
@@ -431,11 +502,20 @@ class DLMTrainer(Trainer):
         # Dynamically load trajectories from trajectory_dataset based on sample_idx
         trajectories = []
         for idx in sample_indices.cpu().tolist():
-            if self.trajectory_dataset is not None and idx < len(self.trajectory_dataset):
-                traj = self.trajectory_dataset[idx]["trajectory"]
+            if self.trajectory_dataset is None:
+                decode_order = []
             else:
-                traj = []
-            trajectories.append(traj)
+                assert idx < len(self.trajectory_dataset), f"sample_idx {idx} out of range"
+                traj = self.trajectory_dataset[idx]["trajectory"]
+
+                if not traj:
+                    decode_order = []
+                else:
+                    assert len(traj)==1 and isinstance(traj[0], list), \
+                        f"Invalid new trajectory at sample {idx}"
+                    decode_order = traj[0]
+
+            trajectories.append(decode_order)
         
         # Get current mask ratio and block size
         current_mask_ratio = self.get_current_mask_ratio()
@@ -641,7 +721,7 @@ def main():
         
         # Generate cache key based on dataset path and max_length (important for preprocessing)
         max_length = distill_config.get("max_length", 1000)
-        cache_params = f"{trajectory_dataset_path}_maxlen{max_length}".encode()
+        cache_params = f"{trajectory_dataset_path}_maxlen{max_length}_trajfmt_decode_order_v1".encode()
         cache_key = hashlib.md5(cache_params).hexdigest()
         cache_file = os.path.join(cache_dir, f"trajectory_preprocessed_{cache_key}.pkl")
         
@@ -684,6 +764,7 @@ def main():
                         processed_trajectories.append([])
                         continue
 
+                    assert isinstance(traj, list) and len(traj) == 1 and isinstance(traj[0], list), f"Invalid trajectory format: {type(traj)}"
                     decode_order = traj[0]
 
                     if len(decode_order) < max_length:
@@ -853,15 +934,18 @@ def main():
     @dataclass
     class MaskDiffusionDataCollator:
         tokenizer: Any
+        max_length: int = 1000
         
         def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
             input_ids = [torch.tensor(f["input_ids"]) for f in features]
             prompt_lengths = [f["prompt_lengths"] for f in features]
             sample_indices = [f["sample_idx"] for f in features]
             
-            target_length = 512 + max(prompt_lengths)
-            # target_length = max(len(ids) for ids in input_ids)
-            # target_length = min(target_length, distill_config.get("max_length", 1000))
+            # target_length = 512 + max(prompt_lengths)
+            target_length = max(len(ids) for ids in input_ids)
+            target_length = min(target_length, self.max_length)
+
+            prompt_lengths = [min(pl, target_length) for pl in prompt_lengths]
             
             pad_token_id = self.tokenizer.eos_token_id
             
@@ -892,6 +976,7 @@ def main():
     
     data_collator_fixed = MaskDiffusionDataCollator(
         tokenizer=tokenizer,
+        max_length=distill_config.get("max_length", 1000),
     )
     
     # 5. Create trainer and train
