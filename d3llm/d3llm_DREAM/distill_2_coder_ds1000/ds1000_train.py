@@ -184,18 +184,24 @@ def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, block_st
     """
     # Empty trajectory: let caller fall back to random masking
     if not decode_order:
-        return None
+        return None # not here
 
     # Defensive clipping to avoid out-of-range slicing
     block_start = max(0, block_start)
     block_end = min(block_end, len(decode_order))
 
     if block_end <= block_start:
-        return None
+        return None # not here
 
     # Current block's decode-order values
     block_orders = decode_order[block_start:block_end]
     block_len = len(block_orders)
+    
+    # --------------------------------------------------------------------------------------
+    # print(f"decoder: {decode_order}")
+    # print(f"mask_ratio: {mask_ratio}, block_start: {block_start}, block_end:{block_end}")
+    # print(f"block_orders: {block_orders}")
+    # --------------------------------------------------------------------------------------
 
     # Valid generation positions are those with positive decode order.
     # order == 0 means prompt / ignored / non-generation position.
@@ -203,6 +209,7 @@ def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, block_st
 
     # If this block has no valid generation positions, do not mask anything here.
     if len(valid_positions) == 0:
+        print("len(valid_positions) == 0")
         return [False] * block_len
 
     # Number of valid positions to keep unmasked in this block.
@@ -228,6 +235,8 @@ def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, block_st
             seg_mask.append(False)
         else:
             seg_mask.append(idx not in visible_pos)
+    
+    print(f"block_orders: {block_orders}; seg_mask:{seg_mask}")
 
     return seg_mask
 
@@ -304,9 +313,6 @@ def forward_process_with_trajectory(
         if use_blockwise:
             max_blocks = response_len // block_size
             num_blocks = random.randint(0, max_blocks)
-
-            # print(f"[Debug] max_blocks={max_blocks}, selected_block={selected_block}")
-
             mask_start = prompt_len + num_blocks * block_size
             mask_end = mask_start + block_size if num_blocks < max_blocks else l
         else:
@@ -314,8 +320,8 @@ def forward_process_with_trajectory(
             mask_end = l
 
         seg_len = mask_end - mask_start
-        block_start = mask_start - prompt_len   # response-relative
-        block_end = mask_end - prompt_len       # response-relative
+        block_start = mask_start - prompt_len   # response-relative  恒0
+        block_end = mask_end - prompt_len       # response-relative  恒16
 
         # Build seg_mask
         if use_naive_random_mask:
@@ -366,7 +372,7 @@ def forward_process_with_trajectory(
         noisy_batch[i, mask_end:l] = mask_token_id
         if use_complementary_loss:
             noisy_batch_rev[i, mask_end:l] = mask_token_id
-
+            
         # print(f"[Debug] sample {i}, total length:{l}")
         # print(f"[Debug] sample {i}, prompt length:{prompt_len}")
         # print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
