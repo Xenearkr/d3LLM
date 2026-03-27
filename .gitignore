@@ -24,4 +24,7 @@ coder_data/
 .gradio
 null/
 *.log
-trajectory_data_1node_4gpu_apps/trajectory_dataset/data-00000-of-00001.arrow
+trajectory_data_1node_4gpu_apps/
+trajectory_data_1node_4gpu_ByteDanceSeed/
+trajectory_data_1node_4gpu_ds1000/
+upload_hf.py
