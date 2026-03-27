@@ -9,7 +9,7 @@ print("正在从镜像站加载并缓存数据...")
 dataset = load_dataset("XenonGas/dream_coder_trajectory_ds1000")
 
 # 2. 保存为包含 state.json 的完整格式
-target_path = "/home/u-shengbf/Codes/d3LLM/trajectory_data_1node_4gpu_ds1000"
+target_path = "/home/u-shengbf/Codes/d3LLM/download_ds1000"
 
 print(f"正在转换格式并保存到: {target_path}")
 # 注意：如果目录已存在且非空，save_to_disk 可能会报错，建议先清空该目录
