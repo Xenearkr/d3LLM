@@ -21,15 +21,14 @@ def main():
     print("Required fields check: PASSED")
     print("=" * 80)
 
-    # 抽查前 3 条样本
-    inspect_num = min(3, len(dataset))
+    inspect_num = min(1, len(dataset))
     for i in range(inspect_num):
         sample = dataset[i]
         print(f"[Sample {i}]")
         print(f"metadata: {sample['metadata']}")
-        print(f"prompt preview: {sample['prompt'][:300]!r}")
-        print(f"reference_code preview: {sample['reference_code'][:300]!r}")
-        print(f"code_context preview: {sample['code_context'][:300]!r}")
+        print(f"prompt: {sample['prompt']!r}")
+        print(f"reference_code: {sample['reference_code']!r}")
+        print(f"code_context: {sample['code_context']!r}")
         print("-" * 80)
 
     # 做一个更严格的内容检查
