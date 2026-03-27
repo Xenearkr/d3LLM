@@ -105,6 +105,19 @@ def prepare_model(config: Dict[str, Any]):
     if lora_config_dict and lora_config_dict.get("enabled", False):
         print("=" * 80)
         print("Applying LoRA configuration...")
+
+        from types import MethodType
+        def _dummy_prepare_inputs_for_generation(self, input_ids, **kwargs):
+            # 训练阶段只用到 forward，不依赖 generate，这里返回最简单的输入字典即可。
+            return {"input_ids": input_ids, **kwargs}
+
+        # 给基础模型挂载该方法，防止 peft 访问时报错
+        if not hasattr(model, "prepare_inputs_for_generation"):
+            model.prepare_inputs_for_generation = MethodType(
+                _dummy_prepare_inputs_for_generation, model
+            )
+
+
         lora_config = LoraConfig(
             r=lora_config_dict.get("r", 16),
             lora_alpha=lora_config_dict.get("lora_alpha", 16),
