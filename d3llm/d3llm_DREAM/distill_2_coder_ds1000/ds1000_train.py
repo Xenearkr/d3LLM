@@ -305,8 +305,8 @@ def forward_process_with_trajectory(
             max_blocks = response_len // block_size
             num_blocks = random.randint(0, max_blocks)
 
-            print(f"[Debug] max_blocks={max_blocks}, selected_block={selected_block}")
-            
+            # print(f"[Debug] max_blocks={max_blocks}, selected_block={selected_block}")
+
             mask_start = prompt_len + num_blocks * block_size
             mask_end = mask_start + block_size if num_blocks < max_blocks else l
         else:
@@ -333,13 +333,13 @@ def forward_process_with_trajectory(
             else:
                 seg_mask = torch.tensor(seg_mask_list, device=device, dtype=torch.bool)
 
-        print(f"[Debug] sample {i}, seg_mask: {seg_mask}")
-        print(f"[Debug] sample {i}, seg_len: {seg_len}")
-        print(f"[Debug] sample {i}, mask_start: {mask_start}")
-        print(f"[Debug] sample {i}, mask_end: {mask_end}")
-        print(f"[Debug] sample {i}, mask_ratio: {mask_ratio}")
-        print(f"[Debug] sample {i}, prompt_len: {prompt_len}")
-        print(f"[Debug] sample {i}, response_len: {response_len}")
+        # print(f"[Debug] sample {i}, seg_mask: {seg_mask}")
+        # print(f"[Debug] sample {i}, seg_len: {seg_len}")
+        # print(f"[Debug] sample {i}, mask_start: {mask_start}")
+        # print(f"[Debug] sample {i}, mask_end: {mask_end}")
+        # print(f"[Debug] sample {i}, mask_ratio: {mask_ratio}")
+        # print(f"[Debug] sample {i}, prompt_len: {prompt_len}")
+        # print(f"[Debug] sample {i}, response_len: {response_len}")
         # print(f"[Debug] sample {i}, len traj_step: {len(traj_step)}")
         # print(f"[Debug] sample {i}, len trajectory_tensor: {len(traj_tensor)}")
 
@@ -369,13 +369,13 @@ def forward_process_with_trajectory(
 
         # print(f"[Debug] sample {i}, total length:{l}")
         # print(f"[Debug] sample {i}, prompt length:{prompt_len}")
-        print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
+        # print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
         # print(f"[Debug] sample {i}, mask_start:{mask_start}, mask_end:{mask_end}")
         # print(f"[Debug] sample {i} masked_indices: {sum(masked_indices[i])}")
         # print(f"[Debug] sample {i} masked_indices_rev: {sum(masked_indices_rev[i])}")
-        print(f"[Debug] sample {i} Ratio of masks in noisy_batch: {sum(noisy_batch[i, mask_start:mask_end] == mask_token_id)}/{mask_end - mask_start}")
+        # print(f"[Debug] sample {i} Ratio of masks in noisy_batch: {sum(noisy_batch[i, mask_start:mask_end] == mask_token_id)}/{mask_end - mask_start}")
         # print(f"[Debug] sample {i} Ratio of masks in noisy_batch_rev: {sum(noisy_batch_rev[i, mask_start:mask_end] == mask_token_id)}/{mask_end - mask_start}")
-        print(f"[Debug] sample {i} ALL Ratio of masks in noisy_batch: {sum(noisy_batch[i, :] == mask_token_id)}/{len(noisy_batch[i, :])}")
+        # print(f"[Debug] sample {i} ALL Ratio of masks in noisy_batch: {sum(noisy_batch[i, :] == mask_token_id)}/{len(noisy_batch[i, :])}")
         # print(f"[Debug] sample {i} ALL Ratio of masks in noisy_batch_rev: {sum(noisy_batch_rev[i, :] == mask_token_id)}/{len(noisy_batch_rev[i, :])}")
 
     if use_complementary_loss:
