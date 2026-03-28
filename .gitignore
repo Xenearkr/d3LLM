@@ -28,3 +28,5 @@ trajectory_data_1node_4gpu_apps/
 trajectory_data_1node_4gpu_ByteDanceSeed/
 trajectory_data_1node_4gpu_ds1000/
 upload_hf.py
+simulated_trajectory_inspect.jsonl
+d3llm/d3llm_DREAM/distill_2_coder_training_512/simulate_trajectory_for_inspection.py

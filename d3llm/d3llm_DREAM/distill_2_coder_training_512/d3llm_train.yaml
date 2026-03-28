@@ -26,7 +26,7 @@ training:
 
 # LoRA configuration (optional, disabled by default)
 lora:
-    enabled: false # Set to true to enable LoRA training
+    enabled: true # Set to true to enable LoRA training
     r: 16
     lora_alpha: 16
     target_modules:
@@ -54,3 +54,7 @@ distillation:
     temperature: 0.5
     entropy_weight: 1.0
     num_proc: 32
+    # new_d3llm_dream_train.py 中使用的启发式揭示顺序
+    heuristic_swap_frac: 0.5
+    heuristic_long_swap_prob: 0.3
+    heuristic_max_swap_distance: 8
