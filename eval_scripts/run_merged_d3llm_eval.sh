@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 
-# 用合并后的自训练 d3LLM-Dream 在任意任务上跑 lm_eval
+# 用 d3LLM-Dream（合并后的本地目录或 Hugging Face 模型 ID）在任意任务上跑 lm_eval
 # 输入：任务名 + max_new_tokens + diffusion_steps + threshold
 # 用法示例（在项目根或 eval_scripts 下运行）:
 #   bash eval_scripts/run_merged_d3llm_eval.sh gsm8k_cot_zeroshot 256 256 0.4
+#   PRETRAINED=d3LLM/d3LLM_Dream_Coders bash eval_scripts/run_merged_d3llm_eval.sh humaneval_instruct 256 256 0.4
+#
+# 模型来源（二选一，PRETRAINED 优先）:
+#   PRETRAINED=org/model   # Hub，不做本地 config 检查
+#   MERGED_MODEL_PATH=...  # 默认仍为 output_model/merged_d3LLM_DREAM_5742
 #
 # 输出：平均 TPF（tokens per forward）和准确率（exact_match, flexible-extract）
+#
+# 进程数：默认 ACCELERATE_NUM_PROCESSES=1（单卡）。多卡数据并行时：
+#   ACCELERATE_NUM_PROCESSES=4 CUDA_VISIBLE_DEVICES=0,1,2,3 bash eval_scripts/run_merged_d3llm_eval.sh ...
 
 set -euo pipefail
 
@@ -22,15 +30,24 @@ THRESHOLD="${4:-0.4}"
 # 项目根目录
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 合并后的自训练模型路径（可通过环境变量覆盖）
 MERGED_MODEL_PATH="${MERGED_MODEL_PATH:-${REPO_ROOT}/output_model/merged_d3LLM_DREAM_5742}"
+# PRETRAINED 优先：可为 Hub 上的 org/model，或任意本地/缓存路径（与 lm_eval pretrained= 一致）
+PRETRAINED_ARG="${PRETRAINED:-$MERGED_MODEL_PATH}"
 
-if [ ! -f "${MERGED_MODEL_PATH}/config.json" ]; then
-  echo "错误: 在 MERGED_MODEL_PATH='${MERGED_MODEL_PATH}' 下未找到 config.json，请确认模型路径是否正确。" >&2
+if [[ -d "${PRETRAINED_ARG}" ]] && [[ ! -f "${PRETRAINED_ARG}/config.json" ]]; then
+  echo "错误: 本地目录 '${PRETRAINED_ARG}' 下未找到 config.json。" >&2
   exit 1
 fi
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+NUM_PROC="${ACCELERATE_NUM_PROCESSES:-1}"
+# 未显式设置 CUDA_VISIBLE_DEVICES 时：单进程只用 GPU0，避免 4 进程各加载一份 7B 长时间无新日志
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  if [ "$NUM_PROC" -eq 1 ]; then
+    export CUDA_VISIBLE_DEVICES=0
+  else
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+  fi
+fi
 export HF_ALLOW_CODE_EVAL=1
 
 EVAL_ROOT="${REPO_ROOT}/utils/utils_Dream/eval_instruct"
@@ -43,12 +60,14 @@ LOG_FILE="${OUTPUT_DIR}/run.log"
 
 echo "运行任务: ${TASK_NAME}"
 echo "max_new_tokens = ${MAX_NEW_TOKENS}, diffusion_steps = ${DIFFUSION_STEPS}, threshold = ${THRESHOLD}"
-echo "模型路径: ${MERGED_MODEL_PATH}"
+echo "pretrained: ${PRETRAINED_ARG}"
+echo "accelerate num_processes: ${NUM_PROC}  (设置 ACCELERATE_NUM_PROCESSES 可改)"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 echo "结果目录: ${OUTPUT_DIR}"
 
-accelerate launch --main_process_port 46667 -m lm_eval \
+accelerate launch --num_processes "${NUM_PROC}" --main_process_port 46667 -m lm_eval \
   --model diffllm \
-  --model_args "torch_compile=False,pretrained=${MERGED_MODEL_PATH},trust_remote_code=True,max_new_tokens=${MAX_NEW_TOKENS},diffusion_steps=${DIFFUSION_STEPS},dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=${THRESHOLD},generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True" \
+  --model_args "torch_compile=False,pretrained=${PRETRAINED_ARG},trust_remote_code=True,max_new_tokens=${MAX_NEW_TOKENS},diffusion_steps=${DIFFUSION_STEPS},dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=${THRESHOLD},generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True" \
   --tasks "${TASK_NAME}" \
   --device cuda \
   --batch_size 1 \

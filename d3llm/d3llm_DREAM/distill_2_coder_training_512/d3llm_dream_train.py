@@ -726,7 +726,7 @@ def main():
     
     # 3. Load the original dataset
     # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-    dataset = load_dataset("coder_data/Ling-Coder-dParallel-merged-512-120k", split="train")
+    dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
     
     # Limit dataset size for testing if max_samples is specified
     max_samples = distill_config.get("max_samples")
