@@ -1,594 +1,469 @@
 #!/usr/bin/env bash
-# 代码 / 通用 lm_eval 评测入口（Dream diffllm、evalplus、LLaDA 预设）
+# 汇总 eval_scripts 下 dream_* / dream-coder.sh / llada_* 中的评测命令，与参考脚本逐行一致（仅将 ~/Codes/d3LLM 换为仓库根目录 REPO_ROOT）。
+# 用法:
+#   bash eval_scripts/run_code_eval.sh <recipe> [MODEL]
+#   MODEL 可选: 覆盖该条 recipe 中的 HF id / 本地路径（pretrained= / model_path= / CKPT_DIR / --model）
+#   MERGED_MODEL_PATH: 仅 recipe dream_gsm8k_cot__merged_mblock_kv_delay1 在未传 MODEL 时使用（默认 ${REPO_ROOT}/output_model/merged_d3LLM_DREAM_5742，与 dream_gsm8k_cot.sh 一致）
 #
-# ========== 1) diffllm：模型 + 任务 + [m] [s] [t] ==========
-#   bash eval_scripts/run_code_eval.sh diffllm <模型路径或HF仓库id> <task> [m] [s] [t]
+#   bash eval_scripts/run_code_eval.sh list
+#   EVALPLUS_DEBUG=1: 打印 dream_coder 相关路径与 python -P 分支（排查 evalplus 导入）
 #
-#   后端 DIFFLLM_BACKEND（默认 auto）:
-#     auto — humaneval_instruct / mbpp_instruct 走 evalplus.evaluate（与 dream-coder.sh 第16–20行
-#            同款 multi_block + dllm）；其它任务仍走 lm_eval + diffllm。
-#     lm_eval — 强制 lm_eval（代码任务也用 instruct 任务与 lm_eval 指标）。
-#     evalplus — 强制 evalplus（仅支持上述代码类任务名）。
-#
-#   与 dream-coder.sh 一致时无需改命令；若要坚持 lm_eval 的 humaneval_instruct：
-#     DIFFLLM_BACKEND=lm_eval bash eval_scripts/run_code_eval.sh diffllm ...
-#
-#   模型解析：若 <模型> 为已存在目录且含 config.json（绝对路径、当前目录相对路径、或相对仓库根
-#   的路径），则按本地合并模型使用；否则视为 Hugging Face 上的 repo id（如 d3LLM/d3LLM_Dream_Coder）。
-#
-#   可选环境变量: NUM_FEWSHOT（mbpp_instruct 未设置时默认 4）、EVAL_OUTPUT_DIR
-#   多卡: 若已设置 CUDA_VISIBLE_DEVICES=0,1,...（多张卡）且未设置 ACCELERATE_NUM_PROCESSES，
-#   则自动令进程数=可见 GPU 数（数据并行）；若只想单卡评测请设 ACCELERATE_NUM_PROCESSES=1
-#
-#   任务简写: humaneval -> humaneval_instruct, mbpp -> mbpp_instruct
-#
-#   示例:
-#     bash eval_scripts/run_code_eval.sh diffllm d3LLM/d3LLM_Dream_Coder humaneval_instruct 256 256 0.4
-#     bash eval_scripts/run_code_eval.sh diffllm output_model/merged_d3LLM_DREAM_Coder humaneval 256 256 0.4
-#
-# ========== 2) evalplus：HumanEval / MBPP（dllm 后端）==========
-#   bash eval_scripts/run_code_eval.sh evalplus <模型路径或HF id> <humaneval|mbpp> [multi_block|vanilla]
-#
-# ========== 3) 旧版预设 ==========
-#   bash eval_scripts/run_code_eval.sh <模型> <数据集>
+# 对照: 各 recipe 名 ≈ eval_scripts/<原脚本> 中对应注释块；详见函数上方注释。
 #
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-D3LLM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# REPO_ROOT：必须基于「本脚本」的绝对路径解析。若仅用 cd "$(dirname "${BASH_SOURCE[0]}")/.."，
+# 在 BASH_SOURCE 为相对路径时，会相对于当前工作目录 cd，cwd 不在仓库根时会得到错误的 REPO_ROOT，
+# 进而 EVALPLUS_ROOT 指向不存在的位置，出现 No module named evalplus.evaluate。
+_script_path="${BASH_SOURCE[0]}"
+[[ "${_script_path}" != /* ]] && _script_path="$(pwd)/${_script_path}"
+SCRIPT_DIR="$(cd "$(dirname "${_script_path}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+unset _script_path
 
-usage() {
-    cat <<'EOF'
-用法摘要:
+MODEL_OVERRIDE="${2:-}"
+# dream-coder / evalplus：原脚本写 PYTHONPATH=evalplus（相对 code_eval）。用绝对路径指向 vendored evalplus。
+EVALPLUS_ROOT="${REPO_ROOT}/utils/utils_DreamCoder/code_eval/evalplus"
+if [[ ! -f "${EVALPLUS_ROOT}/evalplus/evaluate.py" ]]; then
+    echo "错误: 未找到 EvalPlus 模块，期望路径: ${EVALPLUS_ROOT}/evalplus/evaluate.py（REPO_ROOT=${REPO_ROOT}）" >&2
+    exit 1
+fi
 
-  【diffllm】模型 + 任务 + [m] [s] [t]
-    humaneval_instruct / mbpp_instruct 默认走 evalplus（与 dream-coder.sh 一致）；
-    其它任务走 lm_eval。强制 lm_eval: DIFFLLM_BACKEND=lm_eval
-
-  【evalplus】
-    bash eval_scripts/run_code_eval.sh evalplus <模型> <humaneval|mbpp> [multi_block|vanilla]
-
-  【旧版预设】
-    export HF_ALLOW_CODE_EVAL=1
-    bash eval_scripts/run_code_eval.sh <模型> <数据集>
-
-详见脚本顶部注释。
-EOF
-}
-
-# ---------- 解析模型：本地（config.json）或 Hugging Face id ----------
-resolve_pretrained() {
-    local raw="${1:?模型参数不能为空}"
-    local under="${D3LLM_ROOT}/${raw}"
-
-    if [[ -d "$raw" ]]; then
-        if [[ ! -f "${raw}/config.json" ]]; then
-            echo "错误: 本地目录存在但缺少 config.json: $raw" >&2
-            return 1
-        fi
-        (cd "$raw" && pwd)
-        return 0
+# 在 code_eval 目录下跑 python 时，sys.path 会把 cwd 放最前，优先加载外层 evalplus/__init__.py（仓库根的空包），
+# 真正的 evaluate 在内层 evalplus/evaluate.py，于是报错 No module named evalplus.evaluate。
+# Python 3.11+ 的 -P 禁止把 cwd 加入 sys.path，可消除该冲突；旧版本则改为在 REPO_ROOT 下执行。
+_evalplus_run() {
+    export PYTHONPATH="${EVALPLUS_ROOT}"
+    if [[ "${EVALPLUS_DEBUG:-0}" == "1" ]]; then
+        echo "[run_code_eval][evalplus] cwd=$(pwd)" >&2
+        echo "[run_code_eval][evalplus] REPO_ROOT=${REPO_ROOT}" >&2
+        echo "[run_code_eval][evalplus] EVALPLUS_ROOT=${EVALPLUS_ROOT}" >&2
+        echo "[run_code_eval][evalplus] PYTHONPATH=${PYTHONPATH}" >&2
+        echo "[run_code_eval][evalplus] python=$(command -v python) $("${PYTHON:-python}" --version 2>&1)" >&2
     fi
-    if [[ -d "$under" ]] && [[ -f "${under}/config.json" ]]; then
-        echo "$under"
-        return 0
-    fi
-    echo "$raw"
-    return 0
-}
-
-# 与 eval_scripts/dream-coder.sh 中 d3LLM Dream-Coder multi_block 段一致（须在 code_eval/evalplus 目录下执行）
-_dream_coder_evalplus_multi_block() {
-    local ckpt="$1"
-    local dataset="$2"
-    local mnt="$3"
-    local dst="$4"
-    local thr="$5"
-    PYTHONPATH=. python -m evalplus.evaluate \
-        --model "$ckpt" \
-        --trust_remote_code True \
-        --max_new_tokens "$mnt" \
-        --diffusion_steps "$dst" \
-        --dataset "$dataset" \
-        --backend dllm \
-        --temperature 0.0 \
-        --generation_method generation_multi_block \
-        --alg entropy_threshold \
-        --threshold "$thr" \
-        --block_length 32 \
-        --block_add_threshold 0.1 \
-        --decoded_token_threshold 0.95 \
-        --cache_delay_iter 32 \
-        --early_stop True \
-        --torch_compile True
-}
-
-# diffllm + humaneval/mbpp 时走 evalplus（stdout 与直接 python -m evalplus.evaluate 一致，并 tee 到 run.log）
-run_diffllm_evalplus_backend() {
-    local PRETRAINED_ARG="$1"
-    local EP_DATASET="$2"
-    local MAX_NEW_TOKENS="$3"
-    local DIFFUSION_STEPS="$4"
-    local THRESHOLD="$5"
-    local TASK_TAG="$6"
-
-    export HF_ALLOW_CODE_EVAL="${HF_ALLOW_CODE_EVAL:-1}"
-    export HF_DATASETS_TRUST_REMOTE_CODE="${HF_DATASETS_TRUST_REMOTE_CODE:-true}"
-
-    local EVAL_ROOT="${D3LLM_ROOT}/utils/utils_Dream/eval_instruct"
-    local OUT_SLUG="${PRETRAINED_ARG//\//__}"
-    OUT_SLUG="${OUT_SLUG//[^a-zA-Z0-9_.-]/_}"
-    [[ ${#OUT_SLUG} -gt 96 ]] && OUT_SLUG="${OUT_SLUG:0:96}"
-
-    local OUTPUT_DIR
-    if [[ -n "${EVAL_OUTPUT_DIR:-}" ]]; then
-        OUTPUT_DIR="${EVAL_OUTPUT_DIR}"
-    else
-        OUTPUT_DIR="${EVAL_ROOT}/eval_tmp/merged_${TASK_TAG}_m${MAX_NEW_TOKENS}_s${DIFFUSION_STEPS}_t${THRESHOLD}__${OUT_SLUG}__evalplus"
-    fi
-    mkdir -p "${OUTPUT_DIR}"
-    local LOG_FILE="${OUTPUT_DIR}/run.log"
-
-    local EVALPLUS_ROOT="${D3LLM_ROOT}/utils/utils_DreamCoder/code_eval/evalplus"
-    if [[ ! -d "$EVALPLUS_ROOT" ]]; then
-        echo "错误: 未找到 evalplus 目录: $EVALPLUS_ROOT" >&2
-        exit 1
-    fi
-
-    echo "diffllm 后端: evalplus（与 dream-coder.sh 中 evalplus.evaluate multi_block 一致）"
-    echo "evalplus dataset: ${EP_DATASET}（对应 lm_eval 任务名: ${TASK_TAG}）"
-    echo "max_new_tokens = ${MAX_NEW_TOKENS}, diffusion_steps = ${DIFFUSION_STEPS}, threshold = ${THRESHOLD}"
-    echo "pretrained: ${PRETRAINED_ARG}"
-    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}"
-    echo "结果与完整终端输出保存: ${LOG_FILE}"
-
-    (
-        cd "$EVALPLUS_ROOT"
-        _dream_coder_evalplus_multi_block "$PRETRAINED_ARG" "$EP_DATASET" "$MAX_NEW_TOKENS" "$DIFFUSION_STEPS" "$THRESHOLD"
-    ) 2>&1 | tee "${LOG_FILE}"
-
-    echo
-    echo "评测完成（evalplus），正在从日志提取指标…"
-    local AVG_TPF="N/A"
-    local TPF_LINE
-    TPF_LINE="$(grep 'Tokens per forward' "${LOG_FILE}" | tail -n 1 || true)"
-    [[ -n "${TPF_LINE}" ]] && AVG_TPF="$(echo "${TPF_LINE}" | awk '{print $4}')"
-
-    local PASS_SNIP
-    PASS_SNIP="$(grep -iE 'pass@|pass @' "${LOG_FILE}" | tail -n 3 || true)"
-
-    echo "=========== 汇总 (evalplus 后端) =========="
-    echo "任务(lm_eval 名): ${TASK_TAG}"
-    echo "evalplus dataset: ${EP_DATASET}"
-    echo "max_new_tokens: ${MAX_NEW_TOKENS}"
-    echo "diffusion_steps: ${DIFFUSION_STEPS}"
-    echo "threshold: ${THRESHOLD}"
-    echo "pretrained: ${PRETRAINED_ARG}"
-    echo "平均 TPF (若日志中有): ${AVG_TPF}"
-    if [[ -n "${PASS_SNIP}" ]]; then
-        echo "pass@ 相关行（摘录）:"
-        echo "${PASS_SNIP}"
-    else
-        echo "pass@: 请查看上方完整输出或 evalplus 结果目录"
-    fi
-
-    local SUMMARY_FILE="${OUTPUT_DIR}/eval_metrics_summary.txt"
-    {
-        echo "backend=evalplus"
-        echo "pretrained=${PRETRAINED_ARG}"
-        echo "lm_eval_task_name=${TASK_TAG}"
-        echo "evalplus_dataset=${EP_DATASET}"
-        echo "max_new_tokens=${MAX_NEW_TOKENS} diffusion_steps=${DIFFUSION_STEPS} threshold=${THRESHOLD}"
-        echo "tokens_per_forward=${AVG_TPF}"
-        echo "decode=evalplus multi_block (dream-coder.sh 同款)"
-        [[ -n "${PASS_SNIP}" ]] && echo "--- pass@ excerpt ---" && echo "${PASS_SNIP}"
-    } > "${SUMMARY_FILE}"
-    echo "指标摘要已写入: ${SUMMARY_FILE}"
-}
-
-# ---------- 子命令: diffllm（lm_eval 或与 dream-coder 一致的 evalplus）----------
-run_diffllm_mode() {
-    if [[ $# -lt 2 ]]; then
-        echo "用法: $0 diffllm <模型路径或HF id> <lm_eval_task> [max_new_tokens] [diffusion_steps] [threshold]" >&2
-        exit 1
-    fi
-
-    local MODEL_REF="$1"
-    local TASK_NAME="$2"
-    shift 2
-    local MAX_NEW_TOKENS="${1:-256}"
-    local DIFFUSION_STEPS="${2:-256}"
-    local THRESHOLD="${3:-0.4}"
-
-    local PRETRAINED_ARG
-    PRETRAINED_ARG="$(resolve_pretrained "$MODEL_REF")" || exit 1
-
-    case "$TASK_NAME" in
-        humaneval) TASK_NAME=humaneval_instruct ;;
-        mbpp) TASK_NAME=mbpp_instruct ;;
-    esac
-
-    local BACKEND="${DIFFLLM_BACKEND:-auto}"
-    case "$BACKEND" in
-        auto)
-            case "$TASK_NAME" in
-                humaneval_instruct|mbpp_instruct) BACKEND=evalplus ;;
-                *) BACKEND=lm_eval ;;
-            esac
-            ;;
-        lm_eval|evalplus) ;;
-        *)
-            echo "错误: DIFFLLM_BACKEND 须为 auto、lm_eval 或 evalplus（当前: ${BACKEND}）" >&2
-            exit 1
-            ;;
-    esac
-
-    if [[ "$BACKEND" == "evalplus" ]]; then
-        local EP_DATASET=""
-        case "$TASK_NAME" in
-            humaneval_instruct) EP_DATASET=humaneval ;;
-            mbpp_instruct) EP_DATASET=mbpp ;;
-            *)
-                echo "错误: DIFFLLM_BACKEND=evalplus 仅适用于 humaneval_instruct / mbpp_instruct（或 humaneval / mbpp 简写）" >&2
-                exit 1
-                ;;
-        esac
-        if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-            export CUDA_VISIBLE_DEVICES=0
-        fi
-        run_diffllm_evalplus_backend "$PRETRAINED_ARG" "$EP_DATASET" "$MAX_NEW_TOKENS" "$DIFFUSION_STEPS" "$THRESHOLD" "$TASK_NAME"
+    if "${PYTHON:-python}" -P -c "pass" 2>/dev/null; then
+        [[ "${EVALPLUS_DEBUG:-0}" == "1" ]] && echo "[run_code_eval][evalplus] 使用 python -P（避免 cwd 覆盖 evalplus 包）" >&2
+        "${PYTHON:-python}" -P -m evalplus.evaluate "$@"
         return
     fi
+    [[ "${EVALPLUS_DEBUG:-0}" == "1" ]] && echo "[run_code_eval][evalplus] python 无 -P，改为在 REPO_ROOT 下执行" >&2
+    (
+        cd "${REPO_ROOT}" || exit 1
+        export PYTHONPATH="${EVALPLUS_ROOT}"
+        "${PYTHON:-python}" -m evalplus.evaluate "$@"
+    )
+}
 
-    if [[ "$TASK_NAME" == "mbpp_instruct" ]] && [[ "${NUM_FEWSHOT-unset}" == "unset" ]]; then
-        export NUM_FEWSHOT=4
-    fi
-    export NUM_FEWSHOT="${NUM_FEWSHOT:-0}"
+usage() {
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    echo "可用 recipe 见: bash $0 list"
+}
 
-    # 多进程数：显式 ACCELERATE_NUM_PROCESSES 优先；否则若用户已指定多张可见 GPU，则进程数=GPU 数（与 accelerate 数据并行一致）
-    local NUM_PROC
-    if [[ -n "${ACCELERATE_NUM_PROCESSES:-}" ]]; then
-        NUM_PROC="${ACCELERATE_NUM_PROCESSES}"
-    elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] && [[ "${CUDA_VISIBLE_DEVICES}" == *","* ]]; then
-        NUM_PROC=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F',' '{print NF}')
-    else
-        NUM_PROC=1
-    fi
-
-    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-        if [[ "$NUM_PROC" -eq 1 ]]; then
-            export CUDA_VISIBLE_DEVICES=0
-        else
-            # 未指定可见设备但要多进程时，默认使用前 NUM_PROC 张卡
-            export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NUM_PROC - 1)))"
-        fi
-    fi
-
-    export HF_ALLOW_CODE_EVAL="${HF_ALLOW_CODE_EVAL:-1}"
-    export HF_DATASETS_TRUST_REMOTE_CODE="${HF_DATASETS_TRUST_REMOTE_CODE:-true}"
-
-    local EVAL_ROOT="${D3LLM_ROOT}/utils/utils_Dream/eval_instruct"
-    cd "${EVAL_ROOT}"
-
-    local OUT_SLUG="${PRETRAINED_ARG//\//__}"
-    OUT_SLUG="${OUT_SLUG//[^a-zA-Z0-9_.-]/_}"
-    [[ ${#OUT_SLUG} -gt 96 ]] && OUT_SLUG="${OUT_SLUG:0:96}"
-
-    local OUTPUT_DIR
-    if [[ -n "${EVAL_OUTPUT_DIR:-}" ]]; then
-        OUTPUT_DIR="${EVAL_OUTPUT_DIR}"
-    else
-        OUTPUT_DIR="${EVAL_ROOT}/eval_tmp/merged_${TASK_NAME}_m${MAX_NEW_TOKENS}_s${DIFFUSION_STEPS}_t${THRESHOLD}__${OUT_SLUG}"
-    fi
-    mkdir -p "${OUTPUT_DIR}"
-
-    local LOG_FILE="${OUTPUT_DIR}/run.log"
-
-    echo "运行任务: ${TASK_NAME}"
-    echo "max_new_tokens = ${MAX_NEW_TOKENS}, diffusion_steps = ${DIFFUSION_STEPS}, threshold = ${THRESHOLD}, num_fewshot = ${NUM_FEWSHOT}"
-    echo "pretrained: ${PRETRAINED_ARG}"
-    echo "accelerate num_processes: ${NUM_PROC}"
-    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
-    echo "结果目录: ${OUTPUT_DIR}"
-
-    accelerate launch --num_processes "${NUM_PROC}" --main_process_port 46667 -m lm_eval \
+# ---------- dream_gsm8k_cot.sh: Vanilla Dream TPF=1.0 ----------
+dream_gsm8k_cot__vanilla_entropy() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-Dream-org/Dream-v0-Instruct-7B}"
+    CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval \
         --model diffllm \
-        --model_args "torch_compile=False,pretrained=${PRETRAINED_ARG},trust_remote_code=True,max_new_tokens=${MAX_NEW_TOKENS},diffusion_steps=${DIFFUSION_STEPS},dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=${THRESHOLD},generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True" \
-        --tasks "${TASK_NAME}" \
+        --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.1,top_p=0.9,alg="entropy" \
+        --tasks gsm8k_cot_zeroshot \
         --device cuda \
         --batch_size 1 \
-        --num_fewshot "${NUM_FEWSHOT}" \
-        --output_path "${OUTPUT_DIR}" \
-        --log_samples \
-        --confirm_run_unsafe_code \
-        --apply_chat_template 2>&1 | tee "${LOG_FILE}"
-
-    echo
-    echo "评测完成，正在解析 TPF 和准确率..."
-
-    local TPF_LINE AVG_TPF
-    TPF_LINE="$(grep 'Tokens per forward' "${LOG_FILE}" | tail -n 1 || true)"
-    if [[ -z "${TPF_LINE}" ]]; then
-        echo "警告: 未在日志中找到 'Tokens per forward' 行，无法解析 TPF。" >&2
-        AVG_TPF="N/A"
-    else
-        AVG_TPF="$(echo "${TPF_LINE}" | awk '{print $4}')"
-    fi
-
-    local PYTHON_BIN="${PYTHON_BIN:-python}"
-    local ACC_OUTPUT
-    ACC_OUTPUT="$(
-        OUTPUT_DIR="${OUTPUT_DIR}" TASK_NAME="${TASK_NAME}" "${PYTHON_BIN}" - <<'PY'
-import json, os, glob
-output_dir = os.environ["OUTPUT_DIR"]
-task_name = os.environ["TASK_NAME"]
-pattern = os.path.join(output_dir, "**", "results_*.json")
-files = glob.glob(pattern, recursive=True)
-if not files:
-    print("N/A")
-    raise SystemExit(0)
-files.sort(key=os.path.getmtime)
-results_path = files[-1]
-with open(results_path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-task_res = data.get("results", {}).get(task_name)
-if not task_res:
-    print("N/A")
-    raise SystemExit(0)
-acc = None
-for k, v in task_res.items():
-    if k.startswith("exact_match") and "flexible-extract" in k:
-        acc = v
-        break
-if acc is None and "exact_match" in task_res:
-    acc = task_res["exact_match"]
-if acc is None:
-    print("N/A")
-else:
-    print("{:.6f}".format(acc))
-PY
-    )"
-
-    echo "=========== 汇总 =========="
-    echo "任务: ${TASK_NAME}"
-    echo "max_new_tokens: ${MAX_NEW_TOKENS}"
-    echo "diffusion_steps: ${DIFFUSION_STEPS}"
-    echo "threshold: ${THRESHOLD}"
-    echo "num_fewshot: ${NUM_FEWSHOT}"
-    echo "pretrained: ${PRETRAINED_ARG}"
-    echo "平均 TPF (Tokens per forward): ${AVG_TPF}"
-    echo "准确率 (exact_match, flexible-extract): ${ACC_OUTPUT}"
-    echo "结果 JSON 和样本日志保存在: ${OUTPUT_DIR}"
-
-    local SUMMARY_FILE="${OUTPUT_DIR}/eval_metrics_summary.txt"
-    {
-        echo "pretrained=${PRETRAINED_ARG}"
-        echo "task=${TASK_NAME}"
-        echo "max_new_tokens=${MAX_NEW_TOKENS} diffusion_steps=${DIFFUSION_STEPS} threshold=${THRESHOLD}"
-        echo "num_fewshot=${NUM_FEWSHOT}"
-        echo "tokens_per_forward=${AVG_TPF}"
-        echo "exact_match_flexible_extract=${ACC_OUTPUT}"
-        echo "decode=entropy_threshold+generation_multi_block block_length=32 block_add_threshold=0.1 decoded_token_threshold=0.95 cache_delay_iter=1 temperature=0"
-    } > "${SUMMARY_FILE}"
-    echo "指标摘要已写入: ${SUMMARY_FILE}"
+        --num_fewshot 0 \
+        --output_path eval_tmp/gsm8k_cot_zeroshot \
+        --log_samples --confirm_run_unsafe_code \
+        --apply_chat_template
 }
 
-# ---------- 子命令: evalplus ----------
-run_evalplus_mode() {
-    if [[ $# -lt 2 ]]; then
-        echo "用法: $0 evalplus <模型路径或HF id> <humaneval|mbpp> [multi_block|vanilla]" >&2
-        exit 1
-    fi
-    local CKPT_DIR
-    CKPT_DIR="$(resolve_pretrained "$1")" || exit 1
-    local DATASET="$2"
-    local DECODE="${3:-multi_block}"
+# dream_gsm8k_cot.sh: 合并权重示例（原脚本 L71-73，pretrained 为本地目录）
+dream_gsm8k_cot__merged_mblock_kv_delay1() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-${MERGED_MODEL_PATH:-${REPO_ROOT}/output_model/merged_d3LLM_DREAM_5742}}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
 
-    if [[ "$DATASET" != "humaneval" && "$DATASET" != "mbpp" ]]; then
-        echo "错误: 数据集须为 humaneval 或 mbpp" >&2
-        exit 1
-    fi
-    if [[ "$DECODE" != "multi_block" && "$DECODE" != "vanilla" ]]; then
-        echo "错误: 解码模式须为 multi_block 或 vanilla" >&2
-        exit 1
-    fi
+dream_gsm8k_cot__d3llm_entropy() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
 
+dream_gsm8k_cot__d3llm_multiblock_nodelay() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000 --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_gsm8k_cot__d3llm_multiblock_kv_delay1() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+# ---------- dream_humaneval.sh ----------
+dream_humaneval__vanilla_entropy() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    local P="${MODEL_OVERRIDE:-Dream-org/Dream-v0-Instruct-7B}"
+    PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks humaneval_instruct --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_humaneval__d3llm_entropy() {
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks humaneval_instruct --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_humaneval__d3llm_multiblock_t01() {
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,alg=entropy_threshold,dParallel=False,threshold=0.5,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000,early_stop=True --tasks humaneval_instruct --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_humaneval__d3llm_multiblock_delay2() {
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,alg=entropy_threshold,dParallel=False,threshold=0.5,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=2,early_stop=True,refresh_interval=10000 --tasks humaneval_instruct --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+# ---------- dream_long_gsm8k.sh ----------
+dream_long_gsm8k__vanilla_entropy() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-Dream-org/Dream-v0-Instruct-7B}"
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}" PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval \
+        --model diffllm \
+        --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.1,top_p=0.9,alg="entropy" \
+        --tasks gsm8k \
+        --device cuda \
+        --batch_size 1 \
+        --num_fewshot 5 \
+        --output_path eval_tmp/gsm8k \
+        --log_samples --confirm_run_unsafe_code \
+        --apply_chat_template
+}
+
+dream_long_gsm8k__d3llm_multiblock_nodelay() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000,refresh_interval=10000 --tasks gsm8k --device cuda --batch_size 1 --num_fewshot 5 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_long_gsm8k__d3llm_multiblock_kv_delay1() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.45,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k --device cuda --batch_size 1 --num_fewshot 5 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+# ---------- dream_math.sh ----------
+dream_math__d3llm_multiblock_nodelay() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_args pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000 --tasks minerva_math --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/minerva_4 --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_math__d3llm_multiblock_delay2() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=2,refresh_interval=10000,early_stop=True --tasks minerva_math --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/minerva_4 --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+# ---------- dream_mbpp.sh ----------
+dream_mbpp__d3llm_multiblock_nodelay() {
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000 --tasks mbpp_instruct --device cuda --batch_size 1 --num_fewshot 4 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_mbpp__d3llm_entropy() {
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks mbpp_instruct --device cuda --batch_size 1 --num_fewshot 4 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+dream_mbpp__d3llm_multiblock_delay2() {
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    local P="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream}"
+    accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.45,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=2,refresh_interval=10000,early_stop=True --tasks mbpp_instruct --device cuda --batch_size 1 --num_fewshot 4 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+# ---------- dream-coder.sh ----------
+dream_coder__qwen_hf_humaneval() {
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset humaneval --backend hf --temperature 0.1
+}
+
+dream_coder__qwen_hf_mbpp() {
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-Qwen/Qwen2.5-Coder-7B-Instruct}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset mbpp --backend hf --temperature 0.1
+}
+
+dream_coder__humaneval_vanilla_dllm() {
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-Dream-org/Dream-Coder-v0-Instruct-7B}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset humaneval --backend dllm --temperature 0.1
+}
+
+dream_coder__humaneval_d3llm_multiblock() {
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream_Coder}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset humaneval --backend dllm --temperature 0. --generation_method generation_multi_block --alg entropy_threshold --threshold 0.5 --block_length 32 --block_add_threshold 0.1 --decoded_token_threshold 0.95 --cache_delay_iter 32 --early_stop True --torch_compile True
+}
+
+dream_coder__mbpp_vanilla_dllm() {
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-Dream-org/Dream-Coder-v0-Instruct-7B}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset mbpp --backend dllm --temperature 0.1
+}
+
+dream_coder__mbpp_d3llm_multiblock() {
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    CKPT_DIR="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream_Coder}"
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset mbpp --backend dllm --temperature 0. --generation_method generation_multi_block --alg entropy_threshold --threshold 0.5 --block_length 32 --block_add_threshold 0.1 --decoded_token_threshold 0.95 --cache_delay_iter 32 --early_stop True --torch_compile True
+}
+
+# ---------- llada_gsm8k_cot.sh ----------
+# L82-86 d3LLM-LLaDA TPF=1.0（无 HF_ALLOW）
+llada_gsm8k_cot__d3llm_tpf() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29600 eval_llada.py --tasks gsm8k_cot_zeroshot --num_fewshot 0 \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=256,steps=256,block_length=32,show_speed=True,task="gsm8k_cot_zeroshot" --batch_size 1
+}
+
+# L89-100 generate_multi_block
+llada_gsm8k_cot__d3llm_generate_multi_block() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
     export HF_ALLOW_CODE_EVAL=1
     export HF_DATASETS_TRUST_REMOTE_CODE=true
-
-    local EVALPLUS_ROOT="${D3LLM_ROOT}/utils/utils_DreamCoder/code_eval/evalplus"
-    if [[ ! -d "$EVALPLUS_ROOT" ]]; then
-        echo "错误: 未找到 evalplus 目录: $EVALPLUS_ROOT" >&2
-        exit 1
-    fi
-    cd "$EVALPLUS_ROOT"
-
-    local MNT="${EVALPLUS_MAX_NEW_TOKENS:-512}"
-    local DST="${EVALPLUS_DIFFUSION_STEPS:-512}"
-    local THR="${EVALPLUS_THRESHOLD:-0.5}"
-
-    echo "evalplus: model=$CKPT_DIR dataset=$DATASET decode=$DECODE"
-    echo "cwd=$EVALPLUS_ROOT"
-
-    if [[ "$DECODE" == "multi_block" ]]; then
-        _dream_coder_evalplus_multi_block "$CKPT_DIR" "$DATASET" "$MNT" "$DST" "$THR"
-    else
-        PYTHONPATH=. python -m evalplus.evaluate \
-            --model "$CKPT_DIR" \
-            --trust_remote_code True \
-            --max_new_tokens "$MNT" \
-            --diffusion_steps "$DST" \
-            --dataset "$DATASET" \
-            --backend dllm \
-            --temperature 0.1
-    fi
-
-    echo "Dream-Coder evalplus 完成。结果见命令行输出或 evalplus 默认结果目录。"
+    task=gsm8k_cot_zeroshot
+    length=256
+    block_length=32
+    num_fewshot=0
+    steps=256
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="gsm8k_cot_zeroshot",generation_method="generate_multi_block",early_stop=True
 }
 
-# ---------- 旧版：按预设模型名 ----------
-run_legacy_mode() {
-    local MODEL="${1:-}"
-    local DATASET="${2:-}"
-
-    if [[ -z "$MODEL" || -z "$DATASET" ]]; then
-        echo "用法: $0 <模型> <数据集>" >&2
-        echo "  模型: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada | d3llm_dream_coder | vanilla_dream_coder" >&2
-        echo "  数据集: humaneval | mbpp" >&2
-        echo "或: $0 diffllm <模型> <task> [m s t] ； $0 evalplus <模型> <humaneval|mbpp> ..." >&2
-        exit 1
-    fi
-
-    if [[ "$DATASET" != "humaneval" && "$DATASET" != "mbpp" ]]; then
-        echo "错误: 数据集须为 humaneval 或 mbpp"
-        exit 1
-    fi
-
-    if [[ "$HF_ALLOW_CODE_EVAL" != "1" ]]; then
-        echo "请先设置: export HF_ALLOW_CODE_EVAL=1"
-        echo "（HumanEval/MBPP 会执行生成代码，需显式允许）"
-        exit 1
-    fi
-
+# L103-114 generate_multi_block_kv_cache delay=2
+llada_gsm8k_cot__d3llm_kv_delay2() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
     export HF_ALLOW_CODE_EVAL=1
     export HF_DATASETS_TRUST_REMOTE_CODE=true
-
-    case "$MODEL" in
-        d3llm_dream|vanilla_dream)
-            TASK="${DATASET}_instruct"
-            NUM_FEWSHOT=0
-            [[ "$DATASET" == "mbpp" ]] && NUM_FEWSHOT=4
-            cd "$D3LLM_ROOT/utils/utils_Dream/eval_instruct"
-            if [[ "$MODEL" == "d3llm_dream" ]]; then
-                if [[ -n "${D3LLM_DREAM_CHECKPOINT:-}" && "$D3LLM_DREAM_CHECKPOINT" != /* ]]; then
-                    DREAM_PRETRAINED="$D3LLM_ROOT/$D3LLM_DREAM_CHECKPOINT"
-                else
-                    DREAM_PRETRAINED="${D3LLM_DREAM_CHECKPOINT:-d3LLM/d3LLM_Dream}"
-                fi
-                PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval --model diffllm \
-                    --model_args torch_compile=False,pretrained="$DREAM_PRETRAINED",trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.5,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000,early_stop=True \
-                    --tasks "$TASK" --device cuda --batch_size 1 --num_fewshot "$NUM_FEWSHOT" \
-                    --output_path ./eval_tmp/code_eval_"$MODEL"_"$DATASET" --log_samples --confirm_run_unsafe_code --apply_chat_template
-            else
-                PYTHONPATH=. accelerate launch --main_process_port 12334 -m lm_eval --model diffllm \
-                    --model_args torch_compile=False,pretrained=Dream-org/Dream-v0-Instruct-7B,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False \
-                    --tasks "$TASK" --device cuda --batch_size 1 --num_fewshot "$NUM_FEWSHOT" \
-                    --output_path ./eval_tmp/code_eval_"$MODEL"_"$DATASET" --log_samples --confirm_run_unsafe_code --apply_chat_template
-            fi
-            echo "Dream 评估完成。结果见: $D3LLM_ROOT/utils/utils_Dream/eval_instruct/eval_tmp/code_eval_${MODEL}_${DATASET}/"
-            ;;
-        d3llm_llada|vanilla_llada)
-            LENGTH=256
-            BLOCK_LENGTH=32
-            STEPS=256
-            NUM_FEWSHOT=0
-            [[ "$DATASET" == "mbpp" ]] && NUM_FEWSHOT=3
-
-            TASK="$DATASET"
-
-            if [[ "$MODEL" == "d3llm_llada" ]]; then
-                MODEL_PATH="d3LLM/d3LLM_LLaDA"
-                OUTPUT_DIR="d3llm"
-            else
-                MODEL_PATH="GSAI-ML/LLaDA-8B-Instruct"
-                OUTPUT_DIR="GSAI-ML"
-            fi
-            METHOD_NAME_ENCODED="${MODEL_PATH//\//__}"
-            cd "$D3LLM_ROOT/utils/utils_LLaDA"
-            accelerate launch --main_process_port 29600 eval_llada.py --tasks "$TASK" --num_fewshot "$NUM_FEWSHOT" \
-                --confirm_run_unsafe_code --model llada_dist \
-                --model_args model_path="$MODEL_PATH",gen_length=$LENGTH,steps=$STEPS,block_length=$BLOCK_LENGTH,show_speed=True,task="$TASK" \
-                --output_path "evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}" --log_samples
-            latest_jsonl=$(find "evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}/${METHOD_NAME_ENCODED}" -name "samples_${DATASET}_*.jsonl" -type f 2>/dev/null | head -n 1)
-            if [[ -n "$latest_jsonl" ]]; then
-                if [[ "$DATASET" == "humaneval" ]]; then
-                    python postprocess_code_humaneval.py "$latest_jsonl"
-                else
-                    python postprocess_code_mbpp.py "$latest_jsonl"
-                fi
-            else
-                echo "未找到 samples jsonl，请到 evals_results/${OUTPUT_DIR}/ 下查看"
-            fi
-            echo "LLaDA 评估完成。结果见: $D3LLM_ROOT/utils/utils_LLaDA/evals_results/${OUTPUT_DIR}/${DATASET}-run_code_eval-${MODEL}-ns${NUM_FEWSHOT}-${LENGTH}/"
-            ;;
-        d3llm_dream_coder|vanilla_dream_coder)
-            cd "$D3LLM_ROOT/utils/utils_DreamCoder/code_eval/evalplus"
-            CKPT_DIR=""
-            if [[ "$MODEL" == "d3llm_dream_coder" ]]; then
-                CKPT_DIR="d3LLM/d3LLM_Dream_Coder"
-            else
-                CKPT_DIR="Dream-org/Dream-Coder-v0-Instruct-7B"
-            fi
-
-            echo "Running Dream-Coder evalplus for model: $CKPT_DIR on dataset: $DATASET"
-
-            if [[ "$MODEL" == "d3llm_dream_coder" ]]; then
-                PYTHONPATH=. python -m evalplus.evaluate \
-                    --model "$CKPT_DIR" \
-                    --trust_remote_code True \
-                    --max_new_tokens 512 \
-                    --diffusion_steps 512 \
-                    --dataset "$DATASET" \
-                    --backend dllm \
-                    --temperature 0.0 \
-                    --generation_method generation_multi_block \
-                    --alg entropy_threshold \
-                    --threshold 0.5 \
-                    --block_length 32 \
-                    --block_add_threshold 0.1 \
-                    --decoded_token_threshold 0.95 \
-                    --cache_delay_iter 32 \
-                    --early_stop True \
-                    --torch_compile True
-            else
-                PYTHONPATH=. python -m evalplus.evaluate \
-                    --model "$CKPT_DIR" \
-                    --trust_remote_code True \
-                    --max_new_tokens 512 \
-                    --diffusion_steps 512 \
-                    --dataset "$DATASET" \
-                    --backend dllm \
-                    --temperature 0.1
-            fi
-
-            echo "Dream-Coder 评估完成（结果在 evalplus 默认输出目录，如 evalplus_results/ 或命令行输出中）。"
-            ;;
-        *)
-            echo "错误: 未知模型 $MODEL"
-            echo "  可选: d3llm_dream | d3llm_llada | vanilla_dream | vanilla_llada | d3llm_dream_coder | vanilla_dream_coder"
-            echo "  或使用: $0 diffllm <模型> <task> ... | $0 evalplus <模型> <数据集> ..."
-            exit 1
-            ;;
-    esac
+    task=gsm8k_cot_zeroshot
+    length=256
+    block_length=32
+    num_fewshot=0
+    steps=256
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="gsm8k_cot_zeroshot",generation_method="generate_multi_block_kv_cache",cache_delay_iter=2,refresh_interval=3,early_stop=True
 }
 
-# ---------- 主入口 ----------
+# ---------- llada_humaneval.sh d3LLM 块 ----------
+llada_humaneval__d3llm_tpf() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=humaneval
+    length=256
+    block_length=32
+    num_fewshot=0
+    steps=256
+    model_path="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    output_dir='d3llm'
+    METHOD_NAME_ENCODED=$(echo "${model_path}" | sed 's|/|__|g')
+    accelerate launch --main_process_port 29600 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,task="${task}" \
+        --output_path evals_results/${output_dir}/${task}-ns${num_fewshot}-${length} --log_samples
+    latest_jsonl=$(find evals_results/${output_dir}/${task}-ns${num_fewshot}-${length}/${METHOD_NAME_ENCODED} -name "samples_${task}_*.jsonl" -type f 2>/dev/null | head -n 1)
+    [ -n "$latest_jsonl" ] && python postprocess_code_humaneval.py "$latest_jsonl" || echo "No jsonl file found"
+}
+
+llada_humaneval__d3llm_entropy_multiblock() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=humaneval
+    length=256
+    block_length=32
+    num_fewshot=0
+    steps=256
+    model_path="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    output_dir='d3llm'
+    METHOD_NAME_ENCODED=$(echo "${model_path}" | sed 's|/|__|g')
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="${task}" \
+        --output_path evals_results/${output_dir}/${task}-entropy-ns${num_fewshot}-${length} --log_samples
+    latest_jsonl=$(find evals_results/${output_dir}/${task}-entropy-ns${num_fewshot}-${length}/${METHOD_NAME_ENCODED} -name "samples_${task}_*.jsonl" -type f 2>/dev/null | head -n 1)
+    [ -n "$latest_jsonl" ] && python postprocess_code_humaneval.py "$latest_jsonl" || echo "No jsonl file found"
+}
+
+llada_humaneval__d3llm_kv_delay2() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=humaneval
+    length=256
+    block_length=32
+    num_fewshot=0
+    steps=256
+    model_path="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    output_dir='d3llm'
+    METHOD_NAME_ENCODED=$(echo "${model_path}" | sed 's|/|__|g')
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="${task}",generation_method="generate_multi_block_kv_cache",cache_delay_iter=2,refresh_interval=4,block_add_threshold=1.0,decoded_token_threshold=1.0,block_length=32,early_stop=True \
+        --output_path evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length} --log_samples
+    latest_jsonl=$(find evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length}/${METHOD_NAME_ENCODED} -name "samples_${task}_*.jsonl" -type f 2>/dev/null | head -n 1)
+    [ -n "$latest_jsonl" ] && python postprocess_code_humaneval.py "$latest_jsonl" || echo "No jsonl file found"
+}
+
+# ---------- llada_mbpp.sh d3LLM ----------
+llada_mbpp__d3llm_generate_multi_block() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=mbpp
+    length=256
+    block_length=32
+    num_fewshot=3
+    steps=256
+    model_path="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    output_dir='d3llm'
+    METHOD_NAME_ENCODED=$(echo "${model_path}" | sed 's|/|__|g')
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.4,task="${task}",generation_method="generate_multi_block",block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,early_stop=True \
+        --output_path evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length} --log_samples
+    latest_jsonl=$(find evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length}/${METHOD_NAME_ENCODED} -name "samples_${task}_*.jsonl" -type f 2>/dev/null | head -n 1)
+    [ -n "$latest_jsonl" ] && python postprocess_code_mbpp.py "$latest_jsonl" || echo "No jsonl file found"
+}
+
+llada_mbpp__d3llm_kv_delay1() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=mbpp
+    length=256
+    block_length=32
+    num_fewshot=3
+    steps=256
+    model_path="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    output_dir='d3llm'
+    METHOD_NAME_ENCODED=$(echo "${model_path}" | sed 's|/|__|g')
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.4,task="${task}",generation_method="generate_multi_block_kv_cache",cache_delay_iter=1,refresh_interval=10000,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,early_stop=True \
+        --output_path evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length} --log_samples
+    latest_jsonl=$(find evals_results/${output_dir}/${task}-multi-block-ns${num_fewshot}-${length}/${METHOD_NAME_ENCODED} -name "samples_${task}_*.jsonl" -type f 2>/dev/null | head -n 1)
+    [ -n "$latest_jsonl" ] && python postprocess_code_mbpp.py "$latest_jsonl" || echo "No jsonl file found"
+}
+
+# ---------- llada_math.sh d3LLM ----------
+llada_math__d3llm_tpf() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --main_process_port 29600 eval_llada.py --tasks minerva_math --num_fewshot 4 \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=256,steps=256,block_length=32,show_speed=True,task="minerva_math" --batch_size 1
+}
+
+llada_math__d3llm_generate_multi_block() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=minerva_math
+    length=256
+    block_length=32
+    num_fewshot=4
+    steps=256
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="minerva_math",generation_method="generate_multi_block",block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,early_stop=True
+}
+
+llada_math__d3llm_kv_delay1() {
+    cd "${REPO_ROOT}/utils/utils_LLaDA" || exit 1
+    export HF_ALLOW_CODE_EVAL=1
+    export HF_DATASETS_TRUST_REMOTE_CODE=true
+    task=minerva_math
+    length=256
+    block_length=32
+    num_fewshot=4
+    steps=256
+    local MP="${MODEL_OVERRIDE:-d3LLM/d3LLM_LLaDA}"
+    accelerate launch --main_process_port 29601 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path="${MP}",gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,threshold=0.5,task="minerva_math",generation_method="generate_multi_block_kv_cache",cache_delay_iter=1,refresh_interval=10000,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,early_stop=True
+}
+
+list_recipes() {
+    grep -E '^[a-z0-9_]+\(\) \{$' "$0" | sed 's/() {$//' | grep -v '^list_recipes$' | grep -v '^usage$'
+}
+
 case "${1:-}" in
-    diffllm|difflm)
-        shift
-        run_diffllm_mode "$@"
-        ;;
-    evalplus)
-        shift
-        run_evalplus_mode "$@"
-        ;;
-    -h)
+    ""|-h|--help|help)
         usage
         exit 0
         ;;
-    --help)
-        usage
+    list)
+        list_recipes
         exit 0
         ;;
-    help)
-        usage
-        exit 0
-        ;;
-    "")
-        usage
-        exit 1
-        ;;
+    dream_gsm8k_cot__vanilla_entropy) dream_gsm8k_cot__vanilla_entropy ;;
+    dream_gsm8k_cot__merged_mblock_kv_delay1) dream_gsm8k_cot__merged_mblock_kv_delay1 ;;
+    dream_gsm8k_cot__d3llm_entropy) dream_gsm8k_cot__d3llm_entropy ;;
+    dream_gsm8k_cot__d3llm_multiblock_nodelay) dream_gsm8k_cot__d3llm_multiblock_nodelay ;;
+    dream_gsm8k_cot__d3llm_multiblock_kv_delay1) dream_gsm8k_cot__d3llm_multiblock_kv_delay1 ;;
+    dream_humaneval__vanilla_entropy) dream_humaneval__vanilla_entropy ;;
+    dream_humaneval__d3llm_entropy) dream_humaneval__d3llm_entropy ;;
+    dream_humaneval__d3llm_multiblock_t01) dream_humaneval__d3llm_multiblock_t01 ;;
+    dream_humaneval__d3llm_multiblock_delay2) dream_humaneval__d3llm_multiblock_delay2 ;;
+    dream_long_gsm8k__vanilla_entropy) dream_long_gsm8k__vanilla_entropy ;;
+    dream_long_gsm8k__d3llm_multiblock_nodelay) dream_long_gsm8k__d3llm_multiblock_nodelay ;;
+    dream_long_gsm8k__d3llm_multiblock_kv_delay1) dream_long_gsm8k__d3llm_multiblock_kv_delay1 ;;
+    dream_math__d3llm_multiblock_nodelay) dream_math__d3llm_multiblock_nodelay ;;
+    dream_math__d3llm_multiblock_delay2) dream_math__d3llm_multiblock_delay2 ;;
+    dream_mbpp__d3llm_multiblock_nodelay) dream_mbpp__d3llm_multiblock_nodelay ;;
+    dream_mbpp__d3llm_entropy) dream_mbpp__d3llm_entropy ;;
+    dream_mbpp__d3llm_multiblock_delay2) dream_mbpp__d3llm_multiblock_delay2 ;;
+    dream_coder__qwen_hf_humaneval) dream_coder__qwen_hf_humaneval ;;
+    dream_coder__qwen_hf_mbpp) dream_coder__qwen_hf_mbpp ;;
+    dream_coder__humaneval_vanilla_dllm) dream_coder__humaneval_vanilla_dllm ;;
+    dream_coder__humaneval_d3llm_multiblock) dream_coder__humaneval_d3llm_multiblock ;;
+    dream_coder__mbpp_vanilla_dllm) dream_coder__mbpp_vanilla_dllm ;;
+    dream_coder__mbpp_d3llm_multiblock) dream_coder__mbpp_d3llm_multiblock ;;
+    llada_gsm8k_cot__d3llm_tpf) llada_gsm8k_cot__d3llm_tpf ;;
+    llada_gsm8k_cot__d3llm_generate_multi_block) llada_gsm8k_cot__d3llm_generate_multi_block ;;
+    llada_gsm8k_cot__d3llm_kv_delay2) llada_gsm8k_cot__d3llm_kv_delay2 ;;
+    llada_humaneval__d3llm_tpf) llada_humaneval__d3llm_tpf ;;
+    llada_humaneval__d3llm_entropy_multiblock) llada_humaneval__d3llm_entropy_multiblock ;;
+    llada_humaneval__d3llm_kv_delay2) llada_humaneval__d3llm_kv_delay2 ;;
+    llada_mbpp__d3llm_generate_multi_block) llada_mbpp__d3llm_generate_multi_block ;;
+    llada_mbpp__d3llm_kv_delay1) llada_mbpp__d3llm_kv_delay1 ;;
+    llada_math__d3llm_tpf) llada_math__d3llm_tpf ;;
+    llada_math__d3llm_generate_multi_block) llada_math__d3llm_generate_multi_block ;;
+    llada_math__d3llm_kv_delay1) llada_math__d3llm_kv_delay1 ;;
     *)
-        run_legacy_mode "$@"
+        echo "未知 recipe: $1" >&2
+        echo "运行: bash $0 list" >&2
+        exit 1
         ;;
 esac
