@@ -240,6 +240,30 @@ def heuristic_seg_mask_bool(
     return [i in still_masked for i in range(seg_len)]
 
 
+def random_ratio_seg_mask_bool(
+    seg_len: int,
+    mask_ratio: float,
+    rng: random.Random,
+) -> List[bool]:
+    """按 mask_ratio 随机生成掩码：在响应段内均匀随机选取恰好 k 个位置置为 masked。
+
+    k = round(mask_ratio * seg_len)，并裁剪到 [0, seg_len]。与独立 Bernoulli（use_naive_random_mask）
+    不同，本策略在每个 segment 上**精确**满足（四舍五入后的）掩码个数，仅位置随机。
+    """
+    if seg_len <= 0:
+        return []
+    mr = max(0.0, min(1.0, float(mask_ratio)))
+    k = int(round(mr * seg_len))
+    k = max(0, min(seg_len, k))
+    if k == 0:
+        return [False] * seg_len
+    if k == seg_len:
+        return [True] * seg_len
+    chosen = rng.sample(range(seg_len), k)
+    masked_set = set(chosen)
+    return [i in masked_set for i in range(seg_len)]
+
+
 def forward_process_with_trajectory(
     input_ids,
     prompt_lengths,
@@ -248,6 +272,7 @@ def forward_process_with_trajectory(
     mask_ratio=0.5,
     use_blockwise=False,
     use_naive_random_mask=False,
+    use_random_ratio_mask=False,
     use_heuristic_trajectory=True,
     heuristic_swap_frac=HEURISTIC_SWAP_FRAC,
     heuristic_num_swaps=None,
@@ -258,17 +283,20 @@ def forward_process_with_trajectory(
     sample_indices=None,
     global_step: int = 0,
 ):
-    """Forward masking: heuristic pseudo-trajectory (default) or i.i.d. random (baseline).
+    """Forward masking: heuristic pseudo-trajectory (default)、i.i.d. Bernoulli 或按比例的随机定长掩码。
 
     Args:
         use_blockwise: If True, only predict one block; otherwise random mask entire response
-        use_naive_random_mask: If True, use naive random masking baseline instead of trajectory selection
-        use_heuristic_trajectory: If True (and not naive_random), use local decode-order heuristic
+        use_naive_random_mask: If True, 每个位置独立 Bernoulli(mask_ratio)，仅期望比例接近
+        use_random_ratio_mask: If True, 在段内随机选 k=round(mask_ratio*L) 个位置掩码（精确个数）
+        use_heuristic_trajectory: If True (且未启用 naive / random_ratio), use local decode-order heuristic
         heuristic_swap_frac: number of transposition attempts ≈ swap_frac * segment_length
         heuristic_num_swaps: if set, fixed number of attempts (overrides swap_frac)
         heuristic_long_swap_prob: each attempt uses a long swap (timeline distance 2..max) with this probability
         heuristic_max_swap_distance: max |i-j| for long swaps on the reveal timeline
         use_complementary_loss: If True, also return complementary masked batch for dParallel loss
+
+    优先级: use_random_ratio_mask > use_naive_random_mask > use_heuristic_trajectory > Bernoulli 回退
     """
     b, l = input_ids.shape
     device = input_ids.device
@@ -304,19 +332,26 @@ def forward_process_with_trajectory(
             mask_end = l
         
         seg_len = mask_end - mask_start
-        if use_naive_random_mask:
+        sid = int(sample_indices[i].item()) if sample_indices is not None else i
+        seed = (
+            sid * 1000003
+            + int(global_step) * 1315423911
+            + mask_start * 17
+            + mask_end * 31
+            + int(mask_ratio * 1e6)
+        ) & 0xFFFFFFFF
+        rng = random.Random(seed)
+
+        if use_random_ratio_mask:
+            seg_mask = torch.tensor(
+                random_ratio_seg_mask_bool(seg_len, mask_ratio, rng),
+                device=device,
+                dtype=torch.bool,
+            )
+        elif use_naive_random_mask:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
         elif use_heuristic_trajectory:
-            sid = int(sample_indices[i].item()) if sample_indices is not None else i
-            seed = (
-                sid * 1000003
-                + int(global_step) * 1315423911
-                + mask_start * 17
-                + mask_end * 31
-                + int(mask_ratio * 1e6)
-            ) & 0xFFFFFFFF
-            rng = random.Random(seed)
             seg_mask = torch.tensor(
                 heuristic_seg_mask_bool(
                     seg_len,
@@ -388,6 +423,7 @@ class DLMTrainer(Trainer):
         max_mask_ratio=0.8,
         use_blockwise_loss=False,
         use_naive_random_mask=False,
+        use_random_ratio_mask=False,
         use_complementary_loss=False,
         use_heuristic_trajectory=True,
         heuristic_swap_frac=HEURISTIC_SWAP_FRAC,
@@ -406,6 +442,7 @@ class DLMTrainer(Trainer):
         self.max_mask_ratio = max_mask_ratio
         self.use_blockwise_loss = use_blockwise_loss
         self.use_naive_random_mask = use_naive_random_mask
+        self.use_random_ratio_mask = use_random_ratio_mask
         self.use_complementary_loss = use_complementary_loss
         self.use_heuristic_trajectory = use_heuristic_trajectory
         self.heuristic_swap_frac = heuristic_swap_frac
@@ -551,6 +588,7 @@ class DLMTrainer(Trainer):
                 mask_token_id=self.mask_token_id, block_size=current_block_size,
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
+                use_random_ratio_mask=self.use_random_ratio_mask,
                 use_heuristic_trajectory=self.use_heuristic_trajectory,
                 heuristic_swap_frac=self.heuristic_swap_frac,
                 heuristic_num_swaps=self.heuristic_num_swaps,
@@ -566,6 +604,7 @@ class DLMTrainer(Trainer):
                 mask_token_id=self.mask_token_id, block_size=current_block_size,
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
+                use_random_ratio_mask=self.use_random_ratio_mask,
                 use_heuristic_trajectory=self.use_heuristic_trajectory,
                 heuristic_swap_frac=self.heuristic_swap_frac,
                 heuristic_num_swaps=self.heuristic_num_swaps,
@@ -753,13 +792,25 @@ def main():
     heuristic_num_swaps: Optional[int] = None if _ns is None else int(_ns)
     heuristic_long_swap_prob = float(distill_config.get("heuristic_long_swap_prob", HEURISTIC_LONG_SWAP_PROB))
     heuristic_max_swap_distance = int(distill_config.get("heuristic_max_swap_distance", HEURISTIC_MAX_SWAP_DISTANCE))
+    use_random_ratio_mask = bool(distill_config.get("use_random_ratio_mask", False))
+    use_naive_random_mask_cfg = bool(distill_config.get("use_naive_random_mask", False))
     print(
-        "Masking: heuristic pseudo-trajectory "
-        f"(enabled={use_heuristic_trajectory}, swap_frac={heuristic_swap_frac}, "
-        f"num_swaps={heuristic_num_swaps}, long_swap_prob={heuristic_long_swap_prob}, "
-        f"max_swap_distance={heuristic_max_swap_distance}). "
-        "Reveal order is response-local only; prompt is not reordered. "
-        "No local trajectory_dataset is loaded."
+        "Masking: "
+        + (
+            "random k-mask by mask_ratio (uniform positions, k=round(ratio*L))"
+            if use_random_ratio_mask
+            else (
+                "naive i.i.d. Bernoulli per token"
+                if use_naive_random_mask_cfg
+                else (
+                    "heuristic pseudo-trajectory "
+                    f"(enabled={use_heuristic_trajectory}, swap_frac={heuristic_swap_frac}, "
+                    f"num_swaps={heuristic_num_swaps}, long_swap_prob={heuristic_long_swap_prob}, "
+                    f"max_swap_distance={heuristic_max_swap_distance})"
+                )
+            )
+        )
+        + ". Reveal/mask is response-local only; prompt is not reordered."
     )
     
     # 2. Load the original dataset
@@ -946,6 +997,7 @@ def main():
         max_mask_ratio=distill_config.get("max_mask_ratio", 0.8),
         use_blockwise_loss=distill_config.get("use_blockwise_loss", False),
         use_naive_random_mask=distill_config.get("use_naive_random_mask", False),
+        use_random_ratio_mask=distill_config.get("use_random_ratio_mask", False),
         use_complementary_loss=distill_config.get("use_complementary_loss", False),
         use_heuristic_trajectory=use_heuristic_trajectory,
         heuristic_swap_frac=heuristic_swap_frac,
