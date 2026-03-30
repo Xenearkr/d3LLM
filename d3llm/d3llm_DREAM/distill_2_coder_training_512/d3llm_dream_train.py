@@ -105,6 +105,17 @@ def prepare_model(config: Dict[str, Any]):
     if lora_config_dict and lora_config_dict.get("enabled", False):
         print("=" * 80)
         print("Applying LoRA configuration...")
+        # 为不支持 generate 的 DreamModel 打一个假的 prepare_inputs_for_generation，
+        # 以兼容 peft 在 CAUSAL_LM 等 task_type 下的检查。
+        from types import MethodType
+
+        def _dummy_prepare_inputs_for_generation(self, input_ids, **kwargs):
+            return {"input_ids": input_ids, **kwargs}
+
+        if not hasattr(model, "prepare_inputs_for_generation"):
+            model.prepare_inputs_for_generation = MethodType(
+                _dummy_prepare_inputs_for_generation, model
+            )
         lora_config = LoraConfig(
             r=lora_config_dict.get("r", 16),
             lora_alpha=lora_config_dict.get("lora_alpha", 16),
