@@ -58,4 +58,4 @@ distillation:
     heuristic_swap_frac: 0.5
     heuristic_long_swap_prob: 0.3
     heuristic_max_swap_distance: 8
-    use_random_ratio_mask: ture # 若 true：按 mask_ratio 在段内随机选 k=round(ratio*L) 个位置掩码（精确个数）；优先级高于 naive 与启发式
+    use_random_ratio_mask: true # 若 true：按 mask_ratio 在段内随机选 k=round(ratio*L) 个位置掩码（精确个数）；优先级高于 naive 与启发式
