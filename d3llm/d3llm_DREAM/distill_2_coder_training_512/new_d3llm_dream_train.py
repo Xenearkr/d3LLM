@@ -235,9 +235,8 @@ def heuristic_seg_mask_bool(
         max_swap_distance=max_swap_distance,
     )
     k = int(round((1.0 - mask_ratio) * seg_len))
-    k = max(0, min(seg_len, k))
-    still_masked = set(order[k:])
-    return [i in still_masked for i in range(seg_len)]
+    k = max(0, min(seg_len - 1, k))
+    return [order[i] >= k for i in range(seg_len)]
 
 
 def random_ratio_seg_mask_bool(
@@ -254,9 +253,7 @@ def random_ratio_seg_mask_bool(
         return []
     mr = max(0.0, min(1.0, float(mask_ratio)))
     k = int(round(mr * seg_len))
-    k = max(0, min(seg_len, k))
-    if k == 0:
-        return [False] * seg_len
+    k = max(1, min(seg_len, k))
     if k == seg_len:
         return [True] * seg_len
     chosen = rng.sample(range(seg_len), k)
