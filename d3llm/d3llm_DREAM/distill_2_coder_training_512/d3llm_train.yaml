@@ -8,7 +8,7 @@ training:
     output_dir: "output_model/d3LLM_DREAM_Coder"
     num_train_epochs: 3
     gradient_accumulation_steps: 4
-    per_device_train_batch_size: 4
+    per_device_train_batch_size: 2
     logging_steps: 10
     learning_rate: 0.000002
     weight_decay: 0.01
@@ -26,7 +26,7 @@ training:
 
 # LoRA configuration (optional, disabled by default)
 lora:
-    enabled: false # Set to true to enable LoRA training
+    enabled: true # Set to true to enable LoRA training
     r: 16
     lora_alpha: 16
     target_modules:
@@ -46,7 +46,7 @@ distillation:
     max_length: 1000 # Maximum sequence length for training, 432 + 508 + 60 = 1000, 60 is reserved length for template
     max_samples: null # Maximum number of samples for training (null = use all data, set to e.g. 1000 for quick testing)
     use_blockwise_loss: true # If true: compute loss only on one block; if false: entire response
-    use_naive_random_mask: false # If true: use naive random masking baseline instead of trajectory selection
+    use_naive_random_mask: false # If true: 每 token 独立 Bernoulli，仅期望掩码比例接近 mask_ratio
     use_complementary_loss: false # If true: add complementary CE loss (dParallel style)
     progressive_block_sizes: [16, 24, 32] # Block sizes for each epoch
     min_mask_ratio: 0.0 # Min mask ratio for progressive training
@@ -54,3 +54,8 @@ distillation:
     temperature: 0.5
     entropy_weight: 1.0
     num_proc: 32
+    # new_d3llm_dream_train.py 中使用的启发式揭示顺序，用原 d3llm_dream_train.py 时无需设置
+    heuristic_swap_frac: 0.5
+    heuristic_long_swap_prob: 0.3
+    heuristic_max_swap_distance: 8
+    use_random_ratio_mask: false # 若 true：按 mask_ratio 在段内随机选 k=round(ratio*L) 个位置掩码（精确个数）；优先级高于 naive 与启发式
