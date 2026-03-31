@@ -177,11 +177,12 @@ def generate_local_decode_order(
     long_swap_prob: float = HEURISTIC_LONG_SWAP_PROB,
     max_swap_distance: int = HEURISTIC_MAX_SWAP_DISTANCE,
 ) -> List[int]:
-    """Build decode/reveal order over **response-local** indices [0, seg_len).
+    """Build per-position decode step over **response-local** indices [0, seg_len).
 
-    从恒等顺序出发；重复若干次：以概率 ``long_swap_prob`` 在揭示时间轴上交换
-    相距 2..max_swap_distance 的两步，否则交换相邻两步。
-    Prompt 不参与该排列。默认超参见模块级 HEURISTIC_* 常量。
+    返回的 ``order`` 语义与 ``unmask_time`` 一致：``order[pos]`` 表示位置 ``pos``
+    在第几步被解码（step index）。从恒等映射出发，重复若干次交换 step 值：
+    以概率 ``long_swap_prob`` 进行 2..max_swap_distance 的长交换，否则交换相邻步。
+    Prompt 不参与该映射。默认超参见模块级 HEURISTIC_* 常量。
     """
     if seg_len <= 0:
         return []
@@ -221,8 +222,10 @@ def heuristic_seg_mask_bool(
 ) -> List[bool]:
     """Binary mask over a response segment: True = still masked (not yet revealed).
 
-    Reveal order follows ``generate_local_decode_order``. After k = round((1-mask_ratio)*L)
-    reveals, positions ``order[0..k-1]`` are unmasked; the rest stay masked.
+    ``order`` follows ``generate_local_decode_order`` and is interpreted as
+    per-position decode step (same semantics as ``unmask_time``).
+    After k = round((1-mask_ratio)*L), positions with ``order[pos] < k`` are unmasked;
+    positions with ``order[pos] >= k`` stay masked.
     """
     if seg_len <= 0:
         return []
