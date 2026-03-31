@@ -188,7 +188,7 @@ def naive_random_mask(trajectories, mask_ratio, mask_token_id, block_start, bloc
 
 
 def forward_process_with_trajectory(
-    input_ids,
+    input_ids, # input_ids用的是？
     prompt_lengths,
     trajectory_batch,
     mask_token_id=151666,
@@ -807,13 +807,13 @@ def main():
     # 3. Load the original dataset
     # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
     # dataset = load_dataset("coder_data/Ling-Coder-dParallel-merged-512-120k", split="train")
-    dataset = load_dataset("xlangai/DS-1000", split="test")
+    # dataset = load_dataset("xlangai/DS-1000", split="test")
     
     # Limit dataset size for testing if max_samples is specified
     max_samples = distill_config.get("max_samples")
     if max_samples is not None and max_samples > 0:
-        original_size = len(dataset)
-        dataset = dataset.select(range(min(max_samples, original_size)))
+        original_size = len(trajectory_dataset)
+        trajectory_dataset = trajectory_dataset.select(range(min(max_samples, original_size)))
         print(f"=" * 80)
         print(f"[Testing Mode] Limited dataset from {original_size} to {len(dataset)} samples")
         
@@ -830,12 +830,12 @@ def main():
     
     # Generate cache key based on dataset configuration
     cache_params = {
-        "dataset_name": "xlangai/DS-1000",
-        "split": "test", 
+        "dataset_name": "trajectory_dataset",
+        "trajectory_dataset_path": trajectory_dataset_path,
         "model_name": config["model"]["name"],
         "max_samples": max_samples,
         "max_length": distill_config.get("max_length", 1000),
-        "dataset_size": len(dataset),
+        "trajectory_dataset_size": len(trajectory_dataset),
         "use_trajectory": trajectory_dataset is not None,
     }
     cache_key_str = str(cache_params).encode()
@@ -858,23 +858,25 @@ def main():
     else:
         print(f"Tokenized dataset cache not found. Will tokenize from scratch...")
         tokenized_dataset = None
-    
+
     # If cache doesn't exist or failed to load, perform tokenization
     if tokenized_dataset is None:
         # Format each sample, generate the complete text and record the number of tokens in the prompt section
-        def format_example(example):
+        def format_example(example): # 拼接逻辑
             texts = []
             prompt_lengths = []
 
-            for i in range(len(example["prompt"])):
-                prompt = example["prompt"][i]
-                reference_code = example["reference_code"][i]
+            for i in range(len(example["question"])):
+                prompt = example["question"][i]
+                llm_response = example["gt_answer"][i]
+                if llm_response is None:
+                    llm_response = ""
 
                 messages = [{"role": "user", "content": prompt}]
                 prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
                 # 回答
-                answer_text = reference_code + tokenizer.eos_token
+                answer_text = llm_response + tokenizer.eos_token
                 # complete text
                 full_text = prompt_text + answer_text
                 texts.append(full_text)
@@ -885,8 +887,8 @@ def main():
             
             return {"text": texts, "prompt_length": prompt_lengths}
         
-        print(f"Formatting dataset...")
-        formatted_dataset = dataset.map(
+        print(f"Formatting trajectory_dataset...")
+        formatted_dataset = trajectory_dataset.map(
             format_example,
             batched=True,
         )
