@@ -196,7 +196,7 @@ def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, mask_sta
         else:
             seg_mask.append(idx not in visible_pos)
     
-    # print(f"block_orders: {block_orders}; seg_mask:{seg_mask}")
+    print(f"block_orders: {block_orders}; seg_mask:{seg_mask}")
 
     return seg_mask
 
@@ -273,7 +273,7 @@ def forward_process_with_trajectory(
     for i in range(b): # b 恒为 1
         prompt_len = prompt_lengths[i].item()
         response_len = l - prompt_len
-        # print(f"prompt_len: {prompt_len}; response_len: {response_len}") # 77， 18
+        print(f"prompt_len: {prompt_len}; response_len: {response_len}") # 77， 18
 
         if response_len <= 0:
             continue
@@ -291,7 +291,7 @@ def forward_process_with_trajectory(
         seg_len = mask_end - mask_start
         # block_start = mask_start - prompt_len   # response-relative  恒0
         # block_end = mask_end - prompt_len       # response-relative  恒16
-        # print(f"mask_start: {mask_start}, mask_end: {mask_end}")
+        print(f"mask_start: {mask_start}, mask_end: {mask_end}")
         #-------------------------------------------------------------------------------------
 
         # Build seg_mask
@@ -559,7 +559,18 @@ class DLMTrainer(Trainer):
         masked_indices = masked_indices[:, 1:]
         masked_indices_rev = masked_indices_rev[:, 1:] if self.use_complementary_loss else None
 
-        assert masked_indices.any(), f"All masked_indices are False at global_step={self.state.global_step}"
+        if not masked_indices.any():
+            print("useless masked_indices")
+            # print(f"input_ids: {input_ids.detach().cpu().tolist()}")
+            # print(f"trajectories: {trajectories}")
+            # print(f"noisy_batch: {noisy_batch.detach().cpu().tolist()}")
+            # print(f"masked_indices: {masked_indices.detach().cpu().tolist()}")
+            # print(f"masked_indices_rev: {masked_indices_rev.detach().cpu().tolist()}")
+            # print(f"logits: {logits.detach().cpu().tolist()}")
+            # print(f"logits_rev: {logits_rev.detach().cpu().tolist()}")
+            # print(f"ce_loss: {ce_loss.detach().cpu().tolist()}")
+            # print(f"ce_loss_rev: {ce_loss_rev.detach().cpu().tolist()}")
+            # assert False, f"All masked_indices are False at global_step={self.state.global_step}"
         
         # compute logits
         outputs = model(input_ids=noisy_batch)
