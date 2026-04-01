@@ -8,7 +8,7 @@ model:
     torch_dtype: "bfloat16"
 
 training:
-    output_dir: "output_model/d3LLM_APPS_DREAM_Coder"
+    output_dir: "output_model/d3LLM_ByteDanceSeed_DREAM_Coder"
     num_train_epochs: 3
     gradient_accumulation_steps: 8 # 4 减小：更新更频繁一些
     per_device_train_batch_size: 1
@@ -43,7 +43,7 @@ lora:
     task_type: "CAUSAL_LM"
 
 distillation:
-    trajectory_dataset_path: "/home/u-shengbf/Codes/d3LLM/trajectory_data_apps/train"
+    trajectory_dataset_path: "/home/u-shengbf/Codes/d3LLM/trajectory_data_bytedanceseed/train"
     max_length: 1000
     max_samples: null
     use_blockwise_loss: true

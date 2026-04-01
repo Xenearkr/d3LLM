@@ -866,7 +866,7 @@ def main():
     
     # Generate cache key based on dataset configuration
     cache_params = {
-        "dataset_name": "trajectory_dataset",
+        "dataset_name": "trajectory_dataset_bytedanceseed",
         "trajectory_dataset_path": trajectory_dataset_path,
         "model_name": config["model"]["name"],
         "max_samples": max_samples,
@@ -905,7 +905,7 @@ def main():
 
             for i in range(len(example["prompt_ids"])):
                 prompt_ids = example["prompt_ids"][i]
-                gt_answer = example["gt_answer"][i] or ""               # 使用参考代码 计算交叉熵损失
+                gt_answer = example["llm_answer"][i] or ""              # 使用参考代码 计算交叉熵损失
                 # gt_answer = example["llm_answer"][i] or ""            # 使用大模型生成结果 计算交叉熵损失
 
                 answer_ids = tokenizer(

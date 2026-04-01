@@ -866,7 +866,7 @@ def main():
     
     # Generate cache key based on dataset configuration
     cache_params = {
-        "dataset_name": "trajectory_dataset",
+        "dataset_name": "trajectory_dataset_apps",
         "trajectory_dataset_path": trajectory_dataset_path,
         "model_name": config["model"]["name"],
         "max_samples": max_samples,
