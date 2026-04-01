@@ -142,7 +142,7 @@ def prepare_model(config: Dict[str, Any]):
     
     return model, tokenizer
 
-
+# 决定从trajectory中抽哪一个step，重点考察其逻辑
 def select_trajectory_by_ratio(trajectories, mask_ratio, mask_token_id, block_start, block_end):
     """Select the trajectory step with mask ratio closest to target mask ratio in the current block
     
@@ -431,13 +431,13 @@ class DLMTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         input_ids = inputs["input_ids"]
         prompt_lengths = inputs["prompt_lengths"]
-        sample_indices = inputs["sample_idx"]
+        sample_indices = inputs["sample_idx"] # batch中每个样本带一个sample_idx，用这个索引去 trajectory_dataset[idx]["trajectory"] 拿出对应轨迹
         
         # Dynamically load trajectories from trajectory_dataset based on sample_idx
         trajectories = []
         for idx in sample_indices.cpu().tolist():
             if self.trajectory_dataset is not None and idx < len(self.trajectory_dataset):
-                traj = self.trajectory_dataset[idx]["trajectory"]
+                traj = self.trajectory_dataset[idx]["trajectory"] # 取idx对应轨迹
             else:
                 traj = []
             trajectories.append(traj)
@@ -447,7 +447,7 @@ class DLMTrainer(Trainer):
         current_mask_ratio = random.uniform(current_mask_ratio, self.max_mask_ratio)
         current_block_size = self.get_current_block_size()
         
-        # Forward masking with trajectories
+        # Forward masking with trajectories 用 trajectory 生成当前样本的 mask
         if self.use_complementary_loss:
             noisy_batch, noisy_batch_rev, masked_indices, masked_indices_rev = forward_process_with_trajectory(
                 input_ids, prompt_lengths, trajectories,
@@ -631,7 +631,7 @@ def main():
     
     model, tokenizer = prepare_model(config)
     
-    # 2. Load trajectory dataset and create mapping
+    # 2. Load trajectory dataset and create mapping   加载trajectory dataset
     distill_config = config.get("distillation", {})
     trajectory_dataset_path = distill_config.get("trajectory_dataset_path")
     
@@ -687,6 +687,8 @@ def main():
             
             def preprocess_trajectory_sample(examples):
                 """Preprocess trajectory samples: truncate and pad each step to max_length"""
+                """规范格式：统一所有step的长度"""
+                # examples是一批trajectory
                 processed_trajectories = []
                 
                 for traj in examples["trajectory"]:
@@ -694,11 +696,11 @@ def main():
                         padded_traj = []
                         for step in traj:
                             if len(step) < max_length:
-                                # Pad with eos_token to max_length
+                                # Pad with eos_token to max_length 补充pad_token_id
                                 padding_length = max_length - len(step)
                                 padded_step = step + [pad_token_id] * padding_length
                             else:
-                                # Truncate to max_length
+                                # Truncate to max_length 截断到前max_length个token
                                 padded_step = step[:max_length]
                             padded_traj.append(padded_step)
                         processed_trajectories.append(padded_traj)
@@ -707,16 +709,17 @@ def main():
                 
                 return {
                     "trajectory": processed_trajectories,
-                }
+                } #返回处理之后的trajectory
             
             print(f"Preprocessing trajectories (truncate/pad to max_length={max_length})...")
             trajectory_dataset = trajectory_dataset.map(
                 preprocess_trajectory_sample,
                 batched=True,
                 num_proc=num_proc,
-                desc="Preprocessing trajectories"
+                desc="Preprocessing trajectories" # 进度条描述
             )
             print(f"Trajectory preprocessing completed!")
+            # 完成预处理
             
             # Save preprocessed dataset to cache
             try:
@@ -732,7 +735,7 @@ def main():
         print(f"No trajectory dataset specified, using random masking")
         trajectory_dataset = None
     
-    # 3. Load the original dataset
+    # 3. Load the original dataset 修改，这里的逻辑是什么？
     dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
     
     # Limit dataset size for testing if max_samples is specified
@@ -789,7 +792,7 @@ def main():
             texts = []
             prompt_lengths = []
             
-            for question, response in zip(example["question"], example["llm_response"]):
+            for question, response in zip(example["question"], example["llm_response"]): # 只用了question和llm_response
                 # prompt text
                 messages = [{"role": "user", "content": question}]
                 prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)

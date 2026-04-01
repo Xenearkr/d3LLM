@@ -42,7 +42,7 @@ lora:
     task_type: "CAUSAL_LM"
 
 distillation:
-    trajectory_dataset_path: "d3LLM/trajectory_data_dream_32"
+    trajectory_dataset_path: "d3LLM/trajectory_data_dream_32" # 在这里传入！
     max_length: 512 # Maximum sequence length for training
     max_samples: null # Maximum number of samples for training (null = use all data, set to e.g. 1000 for quick testing)
     use_blockwise_loss: true # If true: compute loss only on one block; if false: entire response
