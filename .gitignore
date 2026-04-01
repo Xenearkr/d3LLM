@@ -32,6 +32,4 @@ simulated_trajectory_inspect.jsonl
 d3llm/d3llm_DREAM/distill_2_coder_training_512/simulate_trajectory_for_inspection.py
 evalplus_results/trajectory_data_apps/train/*.arrow
 trajectory_data_apps/train/cache*.arrow
-trajectory_data_apps/train/*.arrow
-trajectory_data_bytedanceseed/train/cache*.arrow
-trajectory_data_bytedanceseed/train/*.arrow
+trajectory_data_apps/train/*.arrowtrajectory_data_bytedanceseed/
