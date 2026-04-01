@@ -33,3 +33,5 @@ d3llm/d3llm_DREAM/distill_2_coder_training_512/simulate_trajectory_for_inspectio
 evalplus_results/trajectory_data_apps/train/*.arrow
 trajectory_data_apps/train/cache*.arrow
 trajectory_data_apps/train/*.arrow
+trajectory_data_bytedanceseed/train/cache*.arrow
+trajectory_data_bytedanceseed/train/*.arrow
