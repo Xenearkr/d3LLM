@@ -22,6 +22,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 unset _script_path
 
 MODEL_OVERRIDE="${2:-}"
+# 若第二参数是本地相对路径，优先按 REPO_ROOT 解析，避免 recipe 内部 cd 后相对路径失效。
+# 仅在目标真实存在时转换，保持 HF repo id 等用法不受影响。
+if [[ -n "${MODEL_OVERRIDE}" && "${MODEL_OVERRIDE}" != /* ]]; then
+    if [[ -e "${REPO_ROOT}/${MODEL_OVERRIDE}" ]]; then
+        MODEL_OVERRIDE="${REPO_ROOT}/${MODEL_OVERRIDE}"
+    fi
+fi
 # dream-coder / evalplus：原脚本写 PYTHONPATH=evalplus（相对 code_eval）。用绝对路径指向 vendored evalplus。
 EVALPLUS_ROOT="${REPO_ROOT}/utils/utils_DreamCoder/code_eval/evalplus"
 if [[ ! -f "${EVALPLUS_ROOT}/evalplus/evaluate.py" ]]; then
