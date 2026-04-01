@@ -904,6 +904,7 @@ def main():
             for i in range(len(example["prompt_ids"])):
                 prompt_ids = example["prompt_ids"][i]
                 gt_answer = example["gt_answer"][i] or ""
+                # gt_answer = example["llm_answer"][i] or ""            # 使用大模型生成结果
 
                 answer_ids = tokenizer(
                     gt_answer + tokenizer.eos_token,

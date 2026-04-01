@@ -1,0 +1,86 @@
+{
+  "builder_name": "arrow",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "dream_coder_trajectory_apps",
+  "dataset_size": 129441843,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/XenonGas/dream_coder_trajectory_apps@f13cb1d4a9d6627175d5c1bdfce2797ed3ba849d/data.arrow": {
+      "num_bytes": 129448352,
+      "checksum": null
+    }
+  },
+  "download_size": 129448352,
+  "features": {
+    "idx": {
+      "dtype": "int64",
+      "_type": "Value"
+    },
+    "question": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "prompt_ids": {
+      "feature": {
+        "dtype": "int64",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "trajectory": {
+      "feature": {
+        "feature": {
+          "dtype": "int64",
+          "_type": "Value"
+        },
+        "_type": "Sequence"
+      },
+      "_type": "Sequence"
+    },
+    "final_output": {
+      "feature": {
+        "dtype": "int64",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "generated_text": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "llm_answer": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "gt_answer": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "is_correct": {
+      "dtype": "bool",
+      "_type": "Value"
+    },
+    "nfe": {
+      "dtype": "int64",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 258890195,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 129441843,
+      "num_examples": 5000,
+      "dataset_name": "dream_coder_trajectory_apps"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
