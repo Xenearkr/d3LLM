@@ -1,0 +1,57 @@
+# 使用说明
+# 选择性修改trajectory_dataset_path、output_dir的路径
+# 调参
+
+model:
+    name: "Dream-org/Dream-Coder-v0-Instruct-7B"
+    trust_remote_code: true
+    torch_dtype: "bfloat16"
+
+training:
+    output_dir: "output_model/d3LLM_APPS_DREAM_Coder"
+    num_train_epochs: 3
+    gradient_accumulation_steps: 8 # 4 减小：更新更频繁一些
+    per_device_train_batch_size: 1
+    logging_steps: 10
+    learning_rate: 0.000002
+    weight_decay: 0.01
+    bf16: True
+    optim: "adamw_torch"
+    warmup_ratio: 0.05
+    max_grad_norm: 1
+    group_by_length: false
+    lr_scheduler_type: "cosine"
+    save_strategy: "epoch"
+    report_to: "wandb"
+    run_name: "ds1000_dream_coder_training"
+    logging_first_step: true
+
+lora:
+    enabled: true
+    r: 16
+    lora_alpha: 16
+    target_modules:
+        - "q_proj"
+        - "k_proj"
+        - "v_proj"
+        - "o_proj"
+        - "gate_proj"
+        - "up_proj"
+        - "down_proj"
+    lora_dropout: 0.0
+    bias: "none"
+    task_type: "CAUSAL_LM"
+
+distillation:
+    trajectory_dataset_path: "/home/u-shengbf/Codes/d3LLM/trajectory_data_apps/train"
+    max_length: 1000
+    max_samples: null
+    use_blockwise_loss: true
+    use_naive_random_mask: false
+    use_complementary_loss: false
+    progressive_block_sizes: [16, 24, 32]
+    min_mask_ratio: 0.0
+    max_mask_ratio: 0.8
+    temperature: 0.5
+    entropy_weight: 1.0
+    num_proc: 16 # 32
