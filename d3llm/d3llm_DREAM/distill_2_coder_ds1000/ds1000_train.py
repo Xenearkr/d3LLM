@@ -60,8 +60,27 @@ def override_config(config: Dict[str, Any], overrides: List[str]) -> Dict[str, A
     return config
 
 
-def get_deepspeed_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Create DeepSpeed configuration"""
+def get_deepspeed_config(config):
+    '''
+    return {
+        "train_batch_size": "auto",
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 8,
+        "gradient_clipping": "auto",
+        "zero_allow_untested_optimizer": True,
+        "bf16": {"enabled": "auto"},
+        "zero_optimization": {
+            "stage": 2,
+            "offload_optimizer": {"device": "cpu", "pin_memory": True},
+            "allgather_partitions": True,
+            "allgather_bucket_size": 2e8,
+            "reduce_scatter": True,
+            "reduce_bucket_size": 2e8,
+            "overlap_comm": True,
+            "contiguous_gradients": True,
+        },
+    }
+    '''
     return {
         "train_batch_size": "auto",
         "train_micro_batch_size_per_gpu": "auto",
@@ -80,7 +99,7 @@ def get_deepspeed_config(config: Dict[str, Any]) -> Dict[str, Any]:
             "contiguous_gradients": True,
         },
     }
-
+    
 
 def prepare_model(config: Dict[str, Any]):
     """Prepare model and tokenizer with optional LoRA"""
@@ -177,7 +196,7 @@ def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, mask_sta
         else:
             seg_mask.append(idx not in visible_pos)
     
-    print(f"block_orders: {block_orders}; seg_mask:{seg_mask}")
+    # print(f"block_orders: {block_orders}; seg_mask:{seg_mask}")
 
     return seg_mask
 
@@ -227,16 +246,16 @@ def forward_process_with_trajectory(
         else:
             noisy_batch, masked_indices
     """
+    # print("input_ids:", input_ids.detach().cpu().tolist())
+    # print(f"decode_order: {trajectory_batch[0]}")
     b, l = input_ids.shape
     device = input_ids.device
 
     assert b == 1
 
-    print(f"input_ids: {input_ids}")
-    print(f"decode_order: {trajectory_batch[0]}")
 
     first_nonzero = next((idx for idx, x in enumerate(trajectory_batch[0]) if x != 0), len(trajectory_batch[0]))
-    print(f"len1={len(input_ids[0])}; prefix_zero_len={first_nonzero}; len2={len(trajectory_batch[0])}")
+    # print(f"len1={len(input_ids[0])}; prefix_zero_len={first_nonzero}; len2={len(trajectory_batch[0])}")
 
     noisy_batch = input_ids.clone()
     noisy_batch_rev = input_ids.clone() if use_complementary_loss else None
@@ -254,17 +273,17 @@ def forward_process_with_trajectory(
     for i in range(b): # b 恒为 1
         prompt_len = prompt_lengths[i].item()
         response_len = l - prompt_len
-        print(f"prompt_len: {prompt_len}; response_len: {response_len}") # 77， 18
+        # print(f"prompt_len: {prompt_len}; response_len: {response_len}") # 77， 18
 
         if response_len <= 0:
             continue
 
         # Choose current response region
         if use_blockwise:
-            max_blocks = response_len // block_size # 18/32 = 0
-            num_blocks = random.randint(0, max_blocks) # 此处始终为0
-            mask_start = prompt_len + num_blocks * block_size # 77
-            mask_end = mask_start + block_size if num_blocks < max_blocks else l # 77 + 18 
+            num_blocks = (response_len + block_size - 1) // block_size
+            block_idx = random.randint(0, num_blocks - 1) # 此处始终为0
+            mask_start = prompt_len + block_idx * block_size # 77
+            mask_end = min(mask_start + block_size, l)
         else:
             mask_start = prompt_len # 77
             mask_end = l # 77 + 18
@@ -272,7 +291,7 @@ def forward_process_with_trajectory(
         seg_len = mask_end - mask_start
         # block_start = mask_start - prompt_len   # response-relative  恒0
         # block_end = mask_end - prompt_len       # response-relative  恒16
-        print(mask_start, mask_end)
+        # print(f"mask_start: {mask_start}, mask_end: {mask_end}")
         #-------------------------------------------------------------------------------------
 
         # Build seg_mask
@@ -702,6 +721,10 @@ def main():
         ddp_find_unused_parameters=False,
         label_names=["input_ids", "prompt_lengths", "sample_idx"],
     )
+    print("per_device_train_batch_size =", training_args.per_device_train_batch_size)
+    print("train_batch_size =", training_args.train_batch_size)
+    print("gradient_accumulation_steps =", training_args.gradient_accumulation_steps)
+    print("=" * 80)
     
     model, tokenizer = prepare_model(config)
     
@@ -720,7 +743,7 @@ def main():
         
         # Generate cache key based on dataset path and max_length (important for preprocessing)
         max_length = distill_config.get("max_length", 1000)
-        cache_params = f"{trajectory_dataset_path}_maxlen{max_length}_trajfmt_decode_order_v1".encode()
+        cache_params = f"{trajectory_dataset_path}_maxlen{max_length}_trajfmt_decode_order_v3".encode()
         cache_key = hashlib.md5(cache_params).hexdigest()
         cache_file = os.path.join(cache_dir, f"trajectory_preprocessed_{cache_key}.pkl")
         
@@ -837,6 +860,7 @@ def main():
         "max_length": distill_config.get("max_length", 1000),
         "trajectory_dataset_size": len(trajectory_dataset),
         "use_trajectory": trajectory_dataset is not None,
+        "input_build_version": "v3",
     }
     cache_key_str = str(cache_params).encode()
     cache_key = hashlib.md5(cache_key_str).hexdigest()
@@ -862,30 +886,26 @@ def main():
     # If cache doesn't exist or failed to load, perform tokenization
     if tokenized_dataset is None:
         # Format each sample, generate the complete text and record the number of tokens in the prompt section
-        def format_example(example): # 拼接逻辑
-            texts = []
+        def format_example(example):
+            input_ids_list = []
             prompt_lengths = []
 
-            for i in range(len(example["question"])):
-                prompt = example["question"][i]
-                llm_response = example["gt_answer"][i]
-                if llm_response is None:
-                    llm_response = ""
+            for i in range(len(example["prompt_ids"])):
+                prompt_ids = example["prompt_ids"][i]
+                gt_answer = example["gt_answer"][i] or ""
 
-                messages = [{"role": "user", "content": prompt}]
-                prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                answer_ids = tokenizer(
+                    gt_answer + tokenizer.eos_token,
+                    add_special_tokens=False
+                )["input_ids"]
+                full_ids = prompt_ids + answer_ids
+                input_ids_list.append(full_ids)
+                prompt_lengths.append(len(prompt_ids))
 
-                # 回答
-                answer_text = llm_response + tokenizer.eos_token
-                # complete text
-                full_text = prompt_text + answer_text
-                texts.append(full_text)
-                
-                # Calculate the number of tokens in the prompt part
-                prompt_token_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-                prompt_lengths.append(len(prompt_token_ids))
-            
-            return {"text": texts, "prompt_length": prompt_lengths}
+            return {
+                "input_ids": input_ids_list,
+                "prompt_length": prompt_lengths,
+            }
         
         print(f"Formatting trajectory_dataset...")
         formatted_dataset = trajectory_dataset.map(
@@ -894,28 +914,24 @@ def main():
         )
         
         def tokenize_function(examples, indices):
-            tokenized = tokenizer(
-                examples["text"],
-                truncation=True,
-                padding=False,
-                max_length=distill_config.get("max_length", 1000),
-                add_special_tokens=False,
-            )
-            
-            tokenized["prompt_lengths"] = examples["prompt_length"]
-            
-            # Store original dataset index for dynamic trajectory loading during training
-            tokenized["sample_idx"] = list(indices)
-            
-            return tokenized
-        
-        print(f"Tokenizing dataset...")
+            max_length = distill_config.get("max_length", 1000)
+
+            input_ids = [ids[:max_length] for ids in examples["input_ids"]]
+            prompt_lengths = [min(pl, max_length) for pl in examples["prompt_length"]]
+
+            return {
+                "input_ids": input_ids,
+                "prompt_lengths": prompt_lengths,
+                "sample_idx": list(indices),
+            }
+
+        print("Tokenizing dataset...")
         tokenized_dataset = formatted_dataset.map(
             tokenize_function,
             batched=True,
             with_indices=True,
         )
-        
+
         # Save tokenized dataset to cache
         try:
             print(f"Saving tokenized dataset to cache: {cache_file_tokenized}")
@@ -938,6 +954,10 @@ def main():
         max_length: int = 1000
         
         def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+
+            # print("len(features) =", len(features))
+            # assert len(features) == 1, f"Expected batch size 1, got {len(features)}"
+            
             input_ids = [torch.tensor(f["input_ids"]) for f in features]
             prompt_lengths = [f["prompt_lengths"] for f in features]
             sample_indices = [f["sample_idx"] for f in features]
