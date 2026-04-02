@@ -8,8 +8,8 @@
   # 示例：将当前的 d3LLM-LLaDA 训练结果 checkpoint-8664 合并
   python merge_lora_llada.py \
     --base GSAI-ML/LLaDA-8B-Instruct \
-    --lora_path output_model/d3LLM_LLaDA_local_0310_043730/checkpoint-8664 \
-    --output_dir output_model/merged_d3LLM_LLaDA_8664
+    --lora_path output_model/d3LLM_LLaDA_local_0331_031307/checkpoint-8670 \
+    --output_dir output_model/merged_d3LLM_LLaDA_8670
 
   # 使用国内镜像下载 base 时:
   HF_ENDPOINT=https://hf-mirror.com python merge_lora_llada.py --base ... --lora_path ... --output_dir ...

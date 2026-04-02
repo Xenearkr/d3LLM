@@ -4,7 +4,7 @@ from plot_lines import plot_aup_curve
 from plot_radar import plot_radar_chart
 from plot_histogram import plot_histogram
 
-DATA_PATHS = ['data_llada.yaml', 'data_dream.yaml', 'data_dream_coder.yaml']
+DATA_PATHS = ['data_llada.yaml', 'data_dream.yaml', 'data_dream_coder.yaml', 'data_custom.yaml']
 IS_DARK_MODE = True
 
 # Collect AUP scores across all datasets for leaderboard
