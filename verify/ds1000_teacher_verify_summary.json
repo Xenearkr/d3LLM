@@ -1,0 +1,8 @@
+{
+  "num_traj_rows": 1000,
+  "num_official_rows": 1000,
+  "verified_passed": 265,
+  "verified_accuracy": 0.265,
+  "label_match_count": 265,
+  "label_match_rate": 0.265
+}
