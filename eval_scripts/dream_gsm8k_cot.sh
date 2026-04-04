@@ -44,6 +44,9 @@ accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_a
 
 
 
+
+
+
 # dParallel-Dream, TPF=1.0:
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained=Zigeng/dParallel_Dream_7B_Instruct,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
@@ -54,21 +57,25 @@ cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 12334 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained=Zigeng/dParallel_Dream_7B_Instruct,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype="bfloat16",temperature=0.,alg="entropy_threshold",dParallel=True,threshold=0.45 --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/entropy_threshold_0.45 --log_samples --confirm_run_unsafe_code --apply_chat_template
 
 
-# d3LLM-Dream, TPF=1.0:
+
+
+
+
+# d3LLM-Dream, TPF=1.0:         TPF=1的基线
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.1,top_p=0.9,alg=entropy,dParallel=False --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
 
 
-# d3LLM-Dream: generate_multi_block (no delay), threshold=0.4:
+# d3LLM-Dream: generate_multi_block (no delay), threshold=0.4:          多块并行解码版，不启用KV Cache
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000 --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
 
-# d3LLM-Dream: generate_multi_block_kv_cache, delay=1:
+# d3LLM-Dream: generate_multi_block_kv_cache, delay=1:          论文完整推理版，在上面基础上增加了 KV-cache + refresh + early stop
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
 
 
-# 合并后的自训练 d3LLM-Dream（merge_lora_dream.py 产出），TPF=1.0:
+# 合并后的自训练 d3LLM-Dream（merge_lora_dream.py 产出），TPF=1.0:          自训练模型路径
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained=/home/u-chenx/chenx/d3LLM-new/output_model/merged_d3LLM_DREAM_5742,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
 
