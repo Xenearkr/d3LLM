@@ -16,6 +16,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 D3LLM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# 读取参数 & 参数检查
 MODEL_KIND="${1:-}"
 DATASET="${2:-}"
 
@@ -42,6 +43,7 @@ if [[ "$HF_ALLOW_CODE_EVAL" != "1" ]]; then
   exit 1
 fi
 
+# 进入目录 
 cd "$D3LLM_ROOT/utils/utils_DreamCoder/code_eval/evalplus"
 
 # 选择模型
