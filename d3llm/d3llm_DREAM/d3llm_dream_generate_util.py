@@ -228,17 +228,17 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
 def sample_tokens_with_entropy(logits, temperature=1.0):
     original_probs = torch.softmax(logits, dim=-1)
     log_probs = torch.log(original_probs + 1e-8)
-    entropy = -torch.sum(original_probs * log_probs, dim=-1)
+    entropy = -torch.sum(original_probs * log_probs, dim=-1) # 标准的信息熵公式
     
     if temperature == 0:
-        samples = torch.argmax(logits, dim=-1)
+        samples = torch.argmax(logits, dim=-1) # 贪心解码，直接取概率最大的token【利用】
     else:
-        scaled_logits = logits / temperature
+        scaled_logits = logits / temperature # 温度缩放
         # Convert to probabilities and sample
-        probs = torch.softmax(scaled_logits, dim=-1)
-        samples = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        probs = torch.softmax(scaled_logits, dim=-1) # 再做softmax
+        samples = torch.multinomial(probs, num_samples=1).squeeze(-1) # 按分布随机采样，entropy不变，但最终token选取保留了一定的随机性
     
-    return entropy, samples
+    return entropy, samples # 返回：该位置的置信度、该位置最终选了哪个token
 
 
 def handle_early_stop(x, block_states, eos_token_id, prompt_length, mask_token_id=None, debug=False):
@@ -668,52 +668,52 @@ class DreamGenerationMixin:
                 attention_mask.unsqueeze(1).unsqueeze(-2),
                 attention_mask.unsqueeze(1).unsqueeze(-1),
             )
-        else:
+        else: # 整条序列都允许正常attention
             tok_idx = None
             attention_mask = "full"
 
         # Process each block 逐块进入 while 循环反复解码
         i = 0
-        for num_block in range(num_blocks):
+        for num_block in range(num_blocks): # 按block顺序处理
             
             current_block_start = input_ids.shape[1] + num_block * block_length
             current_block_end = current_block_start + block_length
             
-            while True:
+            while True: # 当前 block 没填满就反复解码
                 i += 1
                 mask_index = (x == mask_token_id)
 
-                model_output = self(x, attention_mask, tok_idx)
+                model_output = self(x, attention_mask, tok_idx) # 对整条序列进行前向传播
 
-                mask_index[:, current_block_end:] = 0
+                mask_index[:, current_block_end:] = 0 # 屏蔽current_block_end之后的token，本轮不允许未来 block 被解码
                 
-                logits = model_output.logits
-                logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
+                logits = model_output.logits # logits是分数，没有归一化
+                logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1) # 右移，对齐，用前一个位置的logits输出对应后一个位置的预测结果
 
                 if alg == 'entropy_threshold': # 只走了这条分支，熵阈值解码
-                    mask_logits = logits[mask_index]
+                    mask_logits = logits[mask_index] # 只取mask位置的logits
                     
-                    entropy, x0 = sample_tokens_with_entropy(mask_logits, temperature=temperature)
+                    entropy, x0 = sample_tokens_with_entropy(mask_logits, temperature=temperature) # 计算得到：候选token、entropy分数
                     
-                    x_ = torch.zeros_like(x, device=self.device, dtype=torch.long) + mask_token_id
-                    full_entropy = torch.full_like(x, torch.inf, device=self.device, dtype=logits.dtype)
+                    x_ = torch.zeros_like(x, device=self.device, dtype=torch.long) + mask_token_id # x_：如果这轮某个 mask 被解出来，它会变成什么 token
+                    full_entropy = torch.full_like(x, torch.inf, device=self.device, dtype=logits.dtype) # 整条序列每个位置的entropy
                     
                     x_[mask_index] = x0.clone()
                     full_entropy[mask_index] = entropy
                     
-                    current_transfer_tokens = (x[:, current_block_start:current_block_end] == mask_token_id).sum()
+                    current_transfer_tokens = (x[:, current_block_start:current_block_end] == mask_token_id).sum() # 计算当前 block 还剩多少 mask
                     
                     selected_entropy, select_index = torch.topk(full_entropy, current_transfer_tokens, largest=False)
-                    transfer_index = torch.zeros_like(x, device=x.device, dtype=torch.bool)
+                    transfer_index = torch.zeros_like(x, device=x.device, dtype=torch.bool) # 初始化：最终要解码的位置，0/1
                     
                     select_index = select_index.to(x.device)
-                    transfer_index[0, select_index[0]] = True
+                    transfer_index[0, select_index[0]] = True # 确保至少解一个熵值最低的
                     for k in range(1, current_transfer_tokens):
                         if selected_entropy[0, k] < threshold:
                             transfer_index[0, select_index[0, k]] = True
                         else:
                             transfer_index[0, select_index[0, k]] = False
-                    x[transfer_index] = x_[transfer_index].clone()
+                    x[transfer_index] = x_[transfer_index].clone() # 更新序列
 
 
                 if (x[:, current_block_start:current_block_end] == mask_token_id).sum() == 0: # 没有mask，退出循环
@@ -740,6 +740,9 @@ class DreamGenerationMixin:
     ) -> Union[DreamModelOutput, torch.LongTensor]:
         """
         Pipelined parallel decoding without cache. 多 block 无缓存版本
+
+        “前一个 block 解到一定程度，就提前把后一个 block 拉进来一起解”，形成流水线并行解码
+        让多个 block 在时间上重叠推进，提高并行度 / TPF
         
         Args:
             block_add_threshold: Add new block when last block progress >= this threshold.
@@ -775,12 +778,12 @@ class DreamGenerationMixin:
             tok_idx = None
             attn_mask_4d = "full"
         
-        # Track block states: {block_id: {start, end, mask_count, total_masks, is_complete}}
+        # Track block states: {block_id: {start, end, mask_count, total_masks, is_complete}} 用字典跟踪每个block的状态
         # Initialize with prompt block
         block_states = {
             0: {
                 "start": 0,
-                "end": input_ids.shape[1],
+                "end": input_ids.shape[1], # prompt区作为 block 0，天然已完成
                 "mask_count": 0,
                 "total_masks": input_ids.shape[1],
                 "is_complete": True,
@@ -813,12 +816,12 @@ class DreamGenerationMixin:
             mask_index = x == mask_token_id
             total_masks = mask_index[:, prompt_length:].sum()
             
-            if total_masks == 0 and next_block_id > num_blocks:
+            if total_masks == 0 and next_block_id > num_blocks: # 检查结束：生成区无mask、后面没有新block要创建
                 break
             
             nfe += 1
             
-            # Early stop: handle EOS tokens (check every iteration as EOS position may change)
+            # Early stop: handle EOS tokens (check every iteration as EOS position may change) 早停机制
             if early_stop and eos_token_id is not None:
                 debug_this_step = False
                 has_eos, current_eos_pos = handle_early_stop(x, block_states, eos_token_id, prompt_length, 
@@ -871,29 +874,30 @@ class DreamGenerationMixin:
                     if total_masks == 0:
                         break
             
-            # Update block activation states
+            # Update block activation states 检查已经存在的block，看能不能从“普通激活”升级成“fully activated”
             def update_block_activation_states():
-                """Update which blocks should be fully activated based on previous block progress."""
+                """Update which blocks should be fully activated based on previous block progress. block激活机制"""
                 for bid in sorted(block_states.keys()):
                     if bid > 0 and not block_states[bid]["is_complete"]:
                         prev_progress = (
                             1 - block_states[bid - 1]["mask_count"] / block_states[bid - 1]["total_masks"]
                         )
-                        if prev_progress >= decoded_token_threshold:
-                            block_states[bid]["is_complete"] = True
+                        if prev_progress >= decoded_token_threshold: # 前一个block完成度超过了decoded_token_threshold阈值
+                            block_states[bid]["is_complete"] = True # "is_complete" = fully_activated
             
             update_block_activation_states()
             
             # Add new block dynamically based on last block's progress (skip if EOS detected)
+            # 动态创建新block，为何不一上来全创建完所有blocks？EOS可能早出现！
             if next_block_id <= num_blocks and not has_eos:
                 last_bid = max(block_states.keys())
                 if last_bid > 0:  # Not just prompt
-                    last_progress = (
+                    last_progress = ( # 查看当前最后一个block的进度
                         1 - block_states[last_bid]["mask_count"] / block_states[last_bid]["total_masks"]
                     )
                     # Create next block when:
-                    # 1. Last block progress >= block_add_threshold (for parallel processing), OR
-                    # 2. Last block is complete (mask_count == 0) for sequential processing
+                    # 1. Last block progress >= block_add_threshold (for parallel processing) 当前最后一个 block 已经推进到一定程度
+                    # 2. Last block is complete (mask_count == 0) for sequential processing 当前 block 已经完全解完（兼容更接近串行block decoding的情况）
                     should_add_block = (last_progress >= block_add_threshold) or (block_states[last_bid]["mask_count"] == 0)
                     
                     if should_add_block:
@@ -909,7 +913,7 @@ class DreamGenerationMixin:
                             prev_progress = (
                                 1 - block_states[prev_bid]["mask_count"] / block_states[prev_bid]["total_masks"]
                             )
-                            should_activate = prev_progress >= decoded_token_threshold
+                            should_activate = prev_progress >= decoded_token_threshold # 新block有可能直接进入fully_activated状态！做判断
                             
                             block_states[next_block_id] = {
                                 "start": block_start,
@@ -920,7 +924,7 @@ class DreamGenerationMixin:
                             }
                             next_block_id += 1
             
-            # Find the rightmost block that should be processed
+            # Find the rightmost block that should be processed 找到最右边活跃到哪里
             rightmost_active_bid = 0
             for bid in sorted(block_states.keys()):
                 if block_states[bid]["is_complete"] or block_states[bid]["mask_count"] > 0:
@@ -929,30 +933,30 @@ class DreamGenerationMixin:
             if rightmost_active_bid == 0:
                 break
             
-            active_end = block_states[rightmost_active_bid]["end"]
+            active_end = block_states[rightmost_active_bid]["end"] # 本轮的最远解码边界
             
             # Always do forward pass on entire sequence (like generate() does)
             model_output = self(x, attn_mask_4d, None)
             logits = model_output.logits
             logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
             
-            # Mask out future blocks (positions after active_end)
+            # Mask out future blocks (positions after active_end) 只允许 active_end 之前的 mask 在本轮参与解码
             mask_index_for_decode = mask_index.clone()
             mask_index_for_decode[:, active_end:] = 0
             
             # Decode with unified logic across all active blocks
             if alg == 'entropy_threshold':
-                # Calculate entropy for all positions at once
+                # Calculate entropy for all positions at once 先计算所有位置的熵
                 p = F.softmax(logits.to(torch.float64), dim=-1)
                 entropy = -torch.sum(p * torch.log(p + 1e-12), dim=-1)
                 
-                # Sample tokens for all masked positions
+                # Sample tokens for all masked positions 决定每个位置候选 token 是什么
                 x0 = torch.argmax(logits, dim=-1)
                 if temperature > 0:
                     p_temp = F.softmax(logits / temperature, dim=-1)
                     x0 = torch.multinomial(p_temp.view(-1, p_temp.shape[-1]), 1).view(x.shape)
                 
-                # Create transfer index based on entropy threshold
+                # Create transfer index based on entropy threshold 用 entropy threshold 决定哪些 mask 这轮能解
                 transfer_index = (entropy < threshold) & mask_index_for_decode
                 
                 # For fully activated blocks, ensure at least one token is decoded (guaranteed progress)
@@ -968,6 +972,7 @@ class DreamGenerationMixin:
                     
                     if not block_transfer.any():
                         # Force decode the lowest entropy token in this fully activated block
+                        # 如果这个 block 在当前轮里一个 token 都没被 entropy 阈值选中，强制选该 block 中 entropy 最低的一个位置解码
                         block_mask = mask_index_for_decode[:, start:end]
                         block_entropy = entropy[:, start:end]
                         block_entropy = torch.where(block_mask, block_entropy, torch.inf)
@@ -977,7 +982,7 @@ class DreamGenerationMixin:
                 # Apply the decoded tokens
                 x[transfer_index] = x0[transfer_index]
                 
-                # Update block states based on which positions were decoded
+                # Update block states based on which positions were decoded 更新每个 block 还剩多少 mask
                 for bid in sorted(block_states.keys()):
                     if bid > 0 and block_states[bid]["mask_count"] > 0:
                         start, end = block_states[bid]["start"], block_states[bid]["end"]
