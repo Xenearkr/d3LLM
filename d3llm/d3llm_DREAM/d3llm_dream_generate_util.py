@@ -1285,16 +1285,17 @@ class DreamGenerationMixin:
                                                  if block_states[bid]["mask_count"] == 0 and 
                                                     block_states[bid]["completed_at_nfe"] is not None and
                                                     not block_states[bid]["is_cached"]])
-                    refresh_pos = block_states[latest_stabilizing_bid]["start"]
+                    refresh_pos = block_states[latest_stabilizing_bid]["start"] # 前缀保留：只保留到stabilizing block之前
                 else:
                     # Periodic refresh: refresh up to cache_length 到了周期性refresh的轮次
-                    refresh_pos = cache_length
+                    refresh_pos = cache_length # 前缀保留：保留到当前cache_length
                 
                 # Full forward to get fresh cache (only once for all completed blocks) 做一次整句full forward
                 refresh_output = self(x, None, None, use_cache=True)
                 refresh_cache = refresh_output.past_key_values
                 
                 # Truncate cache to refresh_pos (mimics prefix_cache strategy)
+                # 并不是缓存整句，只保留“足够可靠的前缀”
                 past_key_values = DynamicCache()
                 for layer_idx in range(len(refresh_cache)):
                     k, v = refresh_cache[layer_idx]
