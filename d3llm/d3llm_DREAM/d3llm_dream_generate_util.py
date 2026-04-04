@@ -509,14 +509,16 @@ class DreamGenerationMixin:
         generation_config._mask_token_tensor = mask_token_tensor
 
     def _prepare_inputs(self, inputs, generation_config, **kwargs):
-        """Common input preparation for all generation methods"""
-        generation_config = self._prepare_generation_config(generation_config, **kwargs)
+        """Common input preparation for all generation methods 把用户输入整理成 可以进入扩散生成器 的标准格式"""
+        # 将kwargs中属于generation config的字段merge进去
+        # 推理参数一部分显示通过建config传入，另一部分也可能在kwargs中，需要将二者合并
+        generation_config = self._prepare_generation_config(generation_config, **kwargs) 
         
         assert inputs is not None
         input_ids = inputs
         device = input_ids.device
         attention_mask = kwargs.pop("attention_mask", None)
-        self._prepare_special_tokens(generation_config, device=device)
+        self._prepare_special_tokens(generation_config, device=device) # 准备special tokens
         
         input_ids_length = input_ids.shape[-1]
         has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
@@ -524,7 +526,7 @@ class DreamGenerationMixin:
             generation_config=generation_config,
             has_default_max_length=has_default_max_length,
             input_ids_length=input_ids_length,
-        )
+        ) # 计算最终生成长度
         
         self._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
         
@@ -561,7 +563,7 @@ class DreamGenerationMixin:
         generation_config: Optional[DreamGenerationConfig] = None,
         **kwargs,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
-        input_ids, attention_mask, generation_config = self._prepare_inputs(inputs, generation_config, **kwargs)
+        input_ids, attention_mask, generation_config = self._prepare_inputs(inputs, generation_config, **kwargs) # 整理generation_config
         threshold = kwargs.get("threshold", 0.5)
         block_length = kwargs.get("block_length", 32)
         trajectory_one_step = kwargs.get("trajectory_one_step", False)
@@ -573,7 +575,7 @@ class DreamGenerationMixin:
             threshold=threshold,
             block_length=block_length,
             trajectory_one_step=trajectory_one_step,
-        )
+        ) # _sample? 按 block 顺序处理的生成器
         return result, nfe
 
     @torch.no_grad()
@@ -589,8 +591,9 @@ class DreamGenerationMixin:
         block_add_threshold = kwargs.get("block_add_threshold", 0.5)
         decoded_token_threshold = kwargs.get("decoded_token_threshold", 0.5)
         cache_delay_iter = kwargs.get("cache_delay_iter", 10000)    # how many steps to delay before KV-caching, default to 10000 steps (no KV-cache)
-        early_stop = kwargs.get("early_stop", False)
+        early_stop = kwargs.get("early_stop", False) # 作为参数传入
         
+        # 包含两种情况，启用kv cache或不启用kv cache，根据 cache_delay_iter 取值作区分
         if cache_delay_iter >= 10000:  
             # no KV-cache
             result, nfe = self._sample_multi_block(
@@ -638,20 +641,20 @@ class DreamGenerationMixin:
 
         histories = [] if (return_dict_in_generate and output_history) else None
 
-        # pad input_ids to max_length
+        # pad input_ids to max_length 保留prompt的原token，生成区全部填[MASK]
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
         gen_length = max_length - input_ids.shape[1]
         
-   
+
         # Handle block configuration
         if block_length is None:
             block_length = gen_length  # Default: single block (original behavior)
         
         assert gen_length % block_length == 0, f"gen_length ({gen_length}) must be divisible by block_length ({block_length})"
-        num_blocks = gen_length // block_length
+        num_blocks = gen_length // block_length # 把待生成区域均匀切成多个 block
         
         assert steps % num_blocks == 0, f"steps ({steps}) must be divisible by num_blocks ({num_blocks})"
-        steps_per_block = steps // num_blocks
+        steps_per_block = steps // num_blocks # 每个 block 分配固定数量的 diffusion steps
         timesteps = torch.linspace(1, generation_config.eps, steps_per_block + 1, device=x.device)
 
         if attention_mask is not None and torch.any(attention_mask == 0.0):
@@ -669,7 +672,7 @@ class DreamGenerationMixin:
             tok_idx = None
             attention_mask = "full"
 
-        # Process each block
+        # Process each block 逐块进入 while 循环反复解码
         i = 0
         for num_block in range(num_blocks):
             
@@ -687,7 +690,7 @@ class DreamGenerationMixin:
                 logits = model_output.logits
                 logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
 
-                if alg == 'entropy_threshold':
+                if alg == 'entropy_threshold': # 只走了这条分支，熵阈值解码
                     mask_logits = logits[mask_index]
                     
                     entropy, x0 = sample_tokens_with_entropy(mask_logits, temperature=temperature)
@@ -736,7 +739,7 @@ class DreamGenerationMixin:
         early_stop: bool = False,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
         """
-        Pipelined parallel decoding without cache.
+        Pipelined parallel decoding without cache. 多 block 无缓存版本
         
         Args:
             block_add_threshold: Add new block when last block progress >= this threshold.
@@ -757,7 +760,7 @@ class DreamGenerationMixin:
         
         max_new_tokens = max_length - input_ids.shape[1]
         prompt_length = input_ids.shape[1]
-        x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id)
+        x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id) # 预留位置：针对最后一个维度，开头填充0个元素，末尾填充max_new_tokens个元素，全为[MASK]
         
         # Prepare attention mask
         if attention_mask is not None and torch.any(attention_mask == 0.0):
@@ -990,6 +993,8 @@ class DreamGenerationMixin:
             return DreamModelOutput(sequences=x), nfe
         return x, nfe
     
+
+
     def _sample_multi_block_kv_cache(
         self,
         input_ids: torch.LongTensor,
