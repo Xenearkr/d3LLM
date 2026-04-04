@@ -70,6 +70,7 @@ accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_a
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=True,pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=10000 --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template
 
+
 # d3LLM-Dream: generate_multi_block_kv_cache, delay=1:          论文完整推理版，在上面基础上增加了 KV-cache + refresh + early stop
 cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct"
 accelerate launch --main_process_port 46666 -m lm_eval --model diffllm --model_args torch_compile=False,pretrained=d3LLM/d3LLM_Dream,trust_remote_code=True,max_new_tokens=256,diffusion_steps=256,dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold=0.4,generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=1,refresh_interval=10000,early_stop=True --tasks gsm8k_cot_zeroshot --device cuda --batch_size 1 --num_fewshot 0 --output_path ./eval_tmp/multi_block_cot --log_samples --confirm_run_unsafe_code --apply_chat_template

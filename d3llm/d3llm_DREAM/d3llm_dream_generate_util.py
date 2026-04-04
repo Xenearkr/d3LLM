@@ -188,7 +188,7 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
         log_probs = torch.log(probs + epsilon)
         confidence = torch.sum(probs * log_probs, dim=-1)
     
-    return confidence, x0, initial_confidence
+    return confidence, x0, initial_confidence # add initial_confidence
 
 
 # def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confidence=False, neg_entropy=False):
@@ -627,7 +627,7 @@ class DreamGenerationMixin:
         input_ids: torch.LongTensor,
         attention_mask: Optional[torch.LongTensor],
         generation_config: DreamGenerationConfig,
-        threshold: Optional[float] = 0.5,
+        threshold: Optional[float] = 0.5, # 熵阈值，决定哪些 token 这轮可以被解出来
         block_length: Optional[int] = 32,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
         # init values
@@ -643,19 +643,19 @@ class DreamGenerationMixin:
 
         # pad input_ids to max_length 保留prompt的原token，生成区全部填[MASK]
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
-        gen_length = max_length - input_ids.shape[1]
+        gen_length = max_length - input_ids.shape[1] # 生成长度 = 总长度 - prompt长度
         
 
         # Handle block configuration
         if block_length is None:
-            block_length = gen_length  # Default: single block (original behavior)
+            block_length = gen_length  # Default: single block (original behavior) 单块原始行为，把整个生成区当成一个大block
         
         assert gen_length % block_length == 0, f"gen_length ({gen_length}) must be divisible by block_length ({block_length})"
         num_blocks = gen_length // block_length # 把待生成区域均匀切成多个 block
         
         assert steps % num_blocks == 0, f"steps ({steps}) must be divisible by num_blocks ({num_blocks})"
-        steps_per_block = steps // num_blocks # 每个 block 分配固定数量的 diffusion steps
-        timesteps = torch.linspace(1, generation_config.eps, steps_per_block + 1, device=x.device)
+        steps_per_block = steps // num_blocks # 每个 block 分配固定数量的 diffusion steps，似乎没用上？
+        timesteps = torch.linspace(1, generation_config.eps, steps_per_block + 1, device=x.device) # 后续并没有使用？
 
         if attention_mask is not None and torch.any(attention_mask == 0.0):
             # we do not mask the [MASK] tokens so value = 1.0
@@ -716,7 +716,7 @@ class DreamGenerationMixin:
                     x[transfer_index] = x_[transfer_index].clone()
 
 
-                if (x[:, current_block_start:current_block_end] == mask_token_id).sum() == 0:
+                if (x[:, current_block_start:current_block_end] == mask_token_id).sum() == 0: # 没有mask，退出循环
                     break
 
         
