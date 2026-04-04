@@ -258,8 +258,8 @@ def handle_early_stop(x, block_states, eos_token_id, prompt_length, mask_token_i
     
     # Find first EOS position (only among decoded, non-mask tokens)
     pos = torch.arange(gen_region.shape[1], device=x.device).unsqueeze(0)
-    first_eos_rel = torch.where(eos_mask, pos, gen_region.shape[1]).amin(dim=1)
-    first_eos_abs = prompt_length + first_eos_rel[0].item()
+    first_eos_rel = torch.where(eos_mask, pos, gen_region.shape[1]).amin(dim=1) # idx最小的那个eos位置
+    first_eos_abs = prompt_length + first_eos_rel[0].item() # 加上prompt_length，得到绝对坐标
     
     if debug:
         print(f"[EarlyStop] Found first EOS at position {first_eos_abs} (relative: {first_eos_rel[0].item()})")
@@ -268,7 +268,7 @@ def handle_early_stop(x, block_states, eos_token_id, prompt_length, mask_token_i
             decoded_before_eos = ((x[:, prompt_length:first_eos_abs+1] != mask_token_id).sum().item())
             print(f"[EarlyStop] Decoded tokens before (and including) EOS: {decoded_before_eos}")
     
-    # Set all tokens after first EOS to EOS (NOT mask!)
+    # Set all tokens after first EOS to EOS (NOT mask!) 直接用EOS覆盖掉其后所有的位置
     x[:, first_eos_abs+1:] = eos_token_id
     
     # Update block states based on EOS position
@@ -279,12 +279,12 @@ def handle_early_stop(x, block_states, eos_token_id, prompt_length, mask_token_i
             start, end = block_states[bid]["start"], block_states[bid]["end"]
             
             if start > first_eos_abs:
-                # Block entirely after EOS - mark as complete with no masks
+                # Block entirely after EOS - mark as complete with no masks 整个block在eos之后
                 if block_states[bid]["mask_count"] != 0:
-                    block_states[bid]["mask_count"] = 0
-                    block_states[bid]["is_complete"] = True
+                    block_states[bid]["mask_count"] = 0 # 不用再跑这个块了
+                    block_states[bid]["is_complete"] = True # 不用再跑这个块了
                     blocks_marked += 1
-            elif end > first_eos_abs and start <= first_eos_abs:
+            elif end > first_eos_abs and start <= first_eos_abs: # eos所在block
                 # Block CONTAINS EOS - recalculate mask_count for portion before EOS
                 if mask_token_id is not None:
                     # Only count masks from block start to EOS position (inclusive)
@@ -293,7 +293,7 @@ def handle_early_stop(x, block_states, eos_token_id, prompt_length, mask_token_i
                     if masks_before_eos != old_count:
                         block_states[bid]["mask_count"] = masks_before_eos
                         blocks_updated += 1
-                        if masks_before_eos == 0:
+                        if masks_before_eos == 0: # 如果eos之前没有mask，该块即算作完成
                             block_states[bid]["is_complete"] = True
     
     if debug:
@@ -935,7 +935,7 @@ class DreamGenerationMixin:
             
             active_end = block_states[rightmost_active_bid]["end"] # 本轮的最远解码边界
             
-            # Always do forward pass on entire sequence (like generate() does)
+            # Always do forward pass on entire sequence (like generate() does) 永远整句forward
             model_output = self(x, attn_mask_4d, None)
             logits = model_output.logits
             logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
@@ -1067,12 +1067,12 @@ class DreamGenerationMixin:
             next_block_id += 1
         
         # Initialize cache and manually track cache length
-        past_key_values = None
-        manual_cache_length = 0  # Manually track cache length instead of relying on DynamicCache
+        past_key_values = None # 存储先前生成的 token 的键值对，允许在后续的 forward 中复用，避免每轮都重新计算整个序列
+        manual_cache_length = 0  # Manually track cache length instead of relying on DynamicCache 指定当前缓存使用的长度，控制缓存范围; 模型只会缓存和使用这部分 token 的表示，而不是整个序列
         nfe = 0
         has_eos = False
         first_eos_abs = None
-        last_eos_pos = None  # Track EOS position changes
+        last_eos_pos = None  # Track EOS position changes 辅助变量
         
         def update_block_activation_states():
             """Update which blocks should be fully activated based on previous block progress."""
@@ -1107,7 +1107,7 @@ class DreamGenerationMixin:
                 has_eos, current_eos_pos = handle_early_stop(x, block_states, eos_token_id, prompt_length,
                                                             mask_token_id=mask_token_id, debug=debug_this_step)
                 
-                # Track EOS position changes
+                # Track EOS position changes 跟踪EOS的位置变化
                 if has_eos:
                     # if last_eos_pos is not None and current_eos_pos != last_eos_pos:
                         # print(f"[EarlyStop-KV] EOS position changed: {last_eos_pos} -> {current_eos_pos} (delta: {current_eos_pos - last_eos_pos})")
@@ -1131,13 +1131,13 @@ class DreamGenerationMixin:
                                 if actual_mask_count == 0:
                                     block_states[bid]["is_complete"] = True
                             
-                            # Mark blocks after EOS as cached to skip them
+                            # Mark blocks after EOS as cached to skip them 对已经存在且起点在 first_eos_abs 之后的 block
                             if block_states[bid]["start"] > first_eos_abs:
                                 block_states[bid]["is_cached"] = True
                                 if block_states[bid]["completed_at_nfe"] is None:
                                     block_states[bid]["completed_at_nfe"] = nfe
                     
-                    # Create all missing blocks after EOS and mark them as complete
+                    # Create all missing blocks after EOS and mark them as complete 对eos之后且尚未创建的block：全部创建完
                     blocks_created = 0
                     while next_block_id <= num_blocks:
                         block_start = prompt_length + (next_block_id - 1) * block_size
@@ -1213,12 +1213,12 @@ class DreamGenerationMixin:
             cache_length = manual_cache_length
             
             # Update completion timestamps and find blocks ready to cache
-            blocks_to_cache = []
+            blocks_to_cache = [] # 这一轮准备正式写入 cache 的 block 列表
             for bid in sorted(block_states.keys()):
                 if block_states[bid]["end"] <= cache_length:
-                    continue  # Already cached
+                    continue  # Already cached 已经在cache中
                 
-                if block_states[bid]["mask_count"] == 0:  # Fully decoded
+                if block_states[bid]["mask_count"] == 0:  # Fully decoded 解完的
                     # Mark completion time if just finished
                     if block_states[bid]["completed_at_nfe"] is None:
                         block_states[bid]["completed_at_nfe"] = nfe
@@ -1226,18 +1226,19 @@ class DreamGenerationMixin:
                     # Check if ready to cache after delay
                     delay = nfe - block_states[bid]["completed_at_nfe"]
                     if delay >= cache_delay_iter and not block_states[bid]["is_cached"]:
-                        blocks_to_cache.append(bid)
+                        # cache_delay_iter的用武之地，多等cache_delay_iter轮再写入缓存
+                        blocks_to_cache.append(bid) # 进入列表
                         block_states[bid]["is_cached"] = True
                 else:
                     break  # Stop at first incomplete block
             
-            # Determine update_kvcache: how many new tokens to add to cache
+            # Determine update_kvcache: how many new tokens to add to cache 本轮新加入 cache 的 token 数
             update_kvcache = 0
             if blocks_to_cache:
                 latest_to_cache = max(blocks_to_cache)
                 update_kvcache = block_states[latest_to_cache]["end"] - cache_length
             
-            # Determine input sequence and forward strategy
+            # Determine input sequence and forward strategy 决定这一轮 forward 的策略
             # Find the earliest position that needs to be forwarded (not cached)
             forward_start_pos = cache_length  # Start from end of cached region
             
@@ -1248,7 +1249,7 @@ class DreamGenerationMixin:
                     block_states[bid]["completed_at_nfe"] is not None and
                     not block_states[bid]["is_cached"]):
                     # This block is completed but not cached (stabilizing)
-                    has_stabilizing_blocks = True
+                    has_stabilizing_blocks = True # 有已完成但未缓存的block
                     forward_start_pos = min(forward_start_pos, block_states[bid]["start"])
             
             # Also include active blocks
@@ -1259,31 +1260,37 @@ class DreamGenerationMixin:
             # If forward_start_pos >= active_end, no blocks need forwarding
             if forward_start_pos >= active_end:
                 break
+
+            # forward_start_pos 最终表示这一轮最靠左、仍然需要重新 forward 的位置
+            # 被两件事拉左：还在active、仍有mask的block；已完成但未缓存，仍在stabilizing的block
             
             # Determine forward strategy
             if update_kvcache > 0:
-                # Need to cache new blocks: forward from cache_length to end
-                input_seq = x[:, cache_length:]
+                # A. Need to cache new blocks: forward from cache_length to end 这轮需要把新 block 写入 cache
+                # 已经稳定 enough 的完成块正式写入 KV cache，“把 cache 从旧边界继续往右推进” -> delayed kv cache真正生效的前向
+                input_seq = x[:, cache_length:] # 从cache_length开始往后forward，同时把这段结果接到旧cache后面（前缀已经有cache）
                 process_start_pos = cache_length
                 use_kv_cache = True
             elif past_key_values is not None and not has_stabilizing_blocks and nfe % refresh_interval != 0:
-                # Have cache and no stabilizing blocks: can use cache
-                input_seq = x[:, forward_start_pos:]
+                # B. Have cache and no stabilizing blocks: can use cache 已经有 cache，且没有 stabilizing block，也没到 refresh 时机
+                # （cache命中）最理想的快路径：在不刷新 cache 的前提下，最大化复用已有 KV，只计算仍然需要更新的后缀，节省算力
+                input_seq = x[:, forward_start_pos:] # 对象：从forward_start_pos到末尾的后缀
                 process_start_pos = forward_start_pos
                 use_kv_cache = True
             elif past_key_values is not None and (has_stabilizing_blocks or nfe % refresh_interval == 0):
-                # Refresh cache when: 1) has stabilizing blocks, or 2) periodic refresh interval
-                if has_stabilizing_blocks:
+                # C. Refresh cache when: 1) has stabilizing blocks, or 2) periodic refresh interval
+                # 刷新旧cache，针对整条序列
+                if has_stabilizing_blocks: # case 1 有“已完成但未缓存”的块，表示还在变化，必须 refresh
                     latest_stabilizing_bid = max([bid for bid in block_states.keys()
                                                  if block_states[bid]["mask_count"] == 0 and 
                                                     block_states[bid]["completed_at_nfe"] is not None and
                                                     not block_states[bid]["is_cached"]])
                     refresh_pos = block_states[latest_stabilizing_bid]["start"]
                 else:
-                    # Periodic refresh: refresh up to cache_length
+                    # Periodic refresh: refresh up to cache_length 到了周期性refresh的轮次
                     refresh_pos = cache_length
                 
-                # Full forward to get fresh cache (only once for all completed blocks)
+                # Full forward to get fresh cache (only once for all completed blocks) 做一次整句full forward
                 refresh_output = self(x, None, None, use_cache=True)
                 refresh_cache = refresh_output.past_key_values
                 
@@ -1297,7 +1304,7 @@ class DreamGenerationMixin:
                 process_start_pos = 0
                 use_kv_cache = False
             else:
-                # No cache OR has stabilizing blocks: forward full sequence without cache
+                # D. No cache OR has stabilizing blocks: forward full sequence without cache 回退到整句重算状态
                 input_seq = x
                 process_start_pos = 0
                 use_kv_cache = False
@@ -1319,20 +1326,20 @@ class DreamGenerationMixin:
             
             # Forward pass: reuse refresh_output if possible to avoid redundant forward
             if refresh_output is not None and process_start_pos == 0:
-                # Refresh forward already computed full sequence, reuse it
+                # Refresh forward already computed full sequence, reuse it 刚才已经做过了refresh，直接复用
                 outputs = refresh_output
                 logits = torch.cat([refresh_output.logits[:, :1], refresh_output.logits[:, :-1]], dim=1)
             elif use_kv_cache:
-                # With KV cache
+                # With KV cache 走KV Cache
                 cache_position = torch.arange(
                     manual_cache_length, 
                     manual_cache_length + input_seq.shape[1], 
                     device=self.device
                 )
                 outputs = self(
-                    input_seq,
+                    input_seq, # 当前要新算的后缀
                     attention_mask=None,
-                    past_key_values=past_key_values,
+                    past_key_values=past_key_values, # 前缀cache
                     use_cache=True,
                     update_kvcache=update_kvcache if update_kvcache > 0 else 0,
                     cache_position=cache_position
@@ -1341,15 +1348,18 @@ class DreamGenerationMixin:
                 # Note: Cached region is always fully decoded (no masks) by design,
                 # so we don't need to compute entropy for it
             else:
-                # Without KV cache (like _sample_multi_block)
+                # Without KV cache (like _sample_multi_block) 整句forward，同无cache版
                 outputs = self(input_seq, None, None)
                 logits = torch.cat([outputs.logits[:, :1], outputs.logits[:, :-1]], dim=1)
             
-            # Update cache and manual cache length only when we have blocks to cache
+            # Update cache and manual cache length only when we have blocks to cache 若这轮确实扩展了 cache，就更新缓存状态
             if update_kvcache > 0:
                 past_key_values = outputs.past_key_values
                 manual_cache_length += update_kvcache
             
+
+
+            # 开始计算交叉熵损失，kv cache主体逻辑结束
             # Mask out future blocks (positions after active_end)
             mask_index_for_decode = mask_index.clone()
             mask_index_for_decode[:, active_end:] = 0
@@ -1366,7 +1376,7 @@ class DreamGenerationMixin:
                     p_temp = F.softmax(logits / temperature, dim=-1)
                     x0 = torch.multinomial(p_temp.view(-1, p_temp.shape[-1]), 1).view(logits.shape[:2])
                 
-                # Map entropy to full sequence based on what was actually forwarded
+                # Map entropy to full sequence based on what was actually forwarded 关键区别：这里的 logits 可能只对应局部，所以要“映射回整条序列”
                 entropy_full = torch.full_like(x, torch.inf, dtype=entropy.dtype)
                 logits_end = process_start_pos + logits.shape[1]
                 entropy_full[:, process_start_pos:logits_end] = entropy
@@ -1379,6 +1389,7 @@ class DreamGenerationMixin:
                 transfer_index = (entropy_full < threshold) & mask_index_for_decode
                 
                 # For fully activated blocks, ensure at least one token is decoded (guaranteed progress)
+                # fully_activated blocks的保底推送，同前
                 first_fully_activated_bid = None
                 for bid in sorted(block_states.keys()):
                     if bid > 0 and block_states[bid]["is_complete"] and block_states[bid]["mask_count"] > 0:
@@ -1417,7 +1428,7 @@ class DreamGenerationMixin:
                         if x[0, pos].item() == eos_token_id:
                             break
             
-            # Safety check
+            # Safety check 避免陷入死循环，强制停止
             if nfe > 10000:
                 break
         
