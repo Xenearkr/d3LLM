@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 
 # 用合并后的自训练 d3LLM-LLaDA 在任意 LLaDA 任务上跑 eval_llada.py
-# 输入：任务名 + max_new_tokens + diffusion_steps + threshold
+# 输入：任务名 + max_new_tokens + diffusion_steps + threshold + merged_model(可选)
 #
 # 用法示例（在项目根或 eval_scripts 下运行）:
-#   bash eval_scripts/run_merged_d3llm_llada_eval.sh gsm8k_cot 256 256 0.5
+#   bash eval_scripts/run_merged_d3llm_llada_eval.sh gsm8k_cot 256 256 0.5 /path/to/merged_model
 #
 # 输出：eval_llada 的完整结果 JSON；脚本末尾会打印该任务的主指标。
 
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-  echo "用法: $0 <task_name> [max_new_tokens] [diffusion_steps] [threshold]" >&2
-  echo "  示例: $0 gsm8k_cot 256 256 0.5" >&2
+  echo "用法: $0 <task_name> [max_new_tokens] [diffusion_steps] [threshold] [merged_model]" >&2
+  echo "  示例: $0 gsm8k_cot 256 256 0.5 /path/to/merged_model" >&2
   exit 1
 fi
 
@@ -24,11 +24,11 @@ THRESHOLD="${4:-0.5}"
 # 项目根目录
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# 合并后的自训练 LLaDA 模型路径（可通过环境变量覆盖）
-MERGED_LLaDA_MODEL_PATH="${MERGED_LLaDA_MODEL_PATH:-${REPO_ROOT}/output_model/merged_d3LLM_LLaDA_8664}"
+# 合并后的自训练 LLaDA 模型路径（通过参数传递）
+MERGED_LLaDA_MODEL_PATH="${5:-${REPO_ROOT}/output_model/merged_d3LLM_LLaDA_8670}"
 
 if [ ! -f "${MERGED_LLaDA_MODEL_PATH}/config.json" ]; then
-  echo "错误: 在 MERGED_LLaDA_MODEL_PATH='${MERGED_LLaDA_MODEL_PATH}' 下未找到 config.json，请确认模型路径是否正确。" >&2
+  echo "错误: 在 merged_model='${MERGED_LLaDA_MODEL_PATH}' 下未找到 config.json，请确认模型路径是否正确。" >&2
   exit 1
 fi
 
