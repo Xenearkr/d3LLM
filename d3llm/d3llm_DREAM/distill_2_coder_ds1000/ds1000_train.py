@@ -744,12 +744,21 @@ def main():
     trajectory_dataset_path = distill_config.get("trajectory_dataset_path")
     
     if trajectory_dataset_path:
-        # Handle relative path from script directory
-        if not os.path.isabs(trajectory_dataset_path):
+        # Local path: absolute, relative marker, or existing path; otherwise treat as HF dataset id.
+        is_local_trajectory_path = (
+            os.path.isabs(trajectory_dataset_path)
+            or trajectory_dataset_path.startswith(".")
+            or trajectory_dataset_path.startswith("~")
+            or os.path.exists(trajectory_dataset_path)
+        )
+        if is_local_trajectory_path and not os.path.isabs(trajectory_dataset_path):
             trajectory_dataset_path = os.path.join(os.path.dirname(__file__), "..", trajectory_dataset_path)
-        
+
         # Create cache directory and file path
-        cache_dir = os.path.join(os.path.dirname(trajectory_dataset_path), "cache")
+        if is_local_trajectory_path:
+            cache_dir = os.path.join(os.path.dirname(trajectory_dataset_path), "cache")
+        else:
+            cache_dir = os.path.join(os.path.dirname(__file__), "cache")
         os.makedirs(cache_dir, exist_ok=True)
         
         # Generate cache key based on dataset path and max_length (important for preprocessing)
@@ -776,7 +785,10 @@ def main():
         # If cache doesn't exist or failed to load, process dataset
         if trajectory_dataset is None:
             print(f"Loading trajectory dataset from {trajectory_dataset_path}...")
-            trajectory_dataset = load_from_disk(trajectory_dataset_path)
+            if is_local_trajectory_path:
+                trajectory_dataset = load_from_disk(trajectory_dataset_path)
+            else:
+                trajectory_dataset = load_dataset(trajectory_dataset_path, split="train")
             
             # Filter correct samples only
             num_proc = distill_config.get("num_proc", 8)

@@ -43,7 +43,7 @@ lora:
     task_type: "CAUSAL_LM"
 
 distillation:
-    trajectory_dataset_path: "/home/u-shengbf/Codes/d3LLM/trajectory_data_bytedanceseed/train"
+    trajectory_dataset_path: "XenonGas/dream_coder_trajectory_bytedanceseed"
     max_length: 1000
     max_samples: null
     use_blockwise_loss: true
