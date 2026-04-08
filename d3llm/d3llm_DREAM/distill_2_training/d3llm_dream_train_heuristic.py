@@ -1,7 +1,7 @@
 import sys
 import os
 
-sys.path.append("./distill_2_coder_training_512")
+sys.path.append("./distill_2_training")
 import torch
 import torch.nn.functional as F
 import yaml
@@ -13,15 +13,10 @@ from dataclasses import dataclass
 import random
 import pickle
 import hashlib
+import os
 import subprocess
 from ast import literal_eval
-from types import MethodType
 
-# ---------------------------------------------------------------------------
-# 启发式揭示顺序：与 simulate_trajectory_for_inspection.py 命令行默认一致
-# （不传 --swap-frac / --long-swap-prob / --max-swap-distance 时的行为）。
-# 训练时可通过 d3llm_train.yaml 的 distillation 项覆盖；未配置则使用下列写死默认值。
-# ---------------------------------------------------------------------------
 HEURISTIC_SWAP_FRAC = 0.5
 HEURISTIC_LONG_SWAP_PROB = 0.3
 HEURISTIC_MAX_SWAP_DISTANCE = 8
@@ -114,11 +109,15 @@ def prepare_model(config: Dict[str, Any]):
     if lora_config_dict and lora_config_dict.get("enabled", False):
         print("=" * 80)
         print("Applying LoRA configuration...")
-        # PEFT 在 CAUSAL_LM 等 task_type 下会访问 base_model.prepare_inputs_for_generation；
-        # 远程 DreamModel 可能未实现，训练 forward 不依赖 generate，挂一个最小实现即可。
+        # 为不支持 generate 的 DreamModel 打一个假的 prepare_inputs_for_generation，
+        # 以兼容 peft 在 CAUSAL_LM 等 task_type 下的检查。
+        from types import MethodType
+
         def _dummy_prepare_inputs_for_generation(self, input_ids, **kwargs):
+            # 训练阶段只用到 forward，不依赖 generate，这里返回最简单的输入字典即可。
             return {"input_ids": input_ids, **kwargs}
 
+        # 给基础模型挂载该方法，防止 peft 访问时报错
         if not hasattr(model, "prepare_inputs_for_generation"):
             model.prepare_inputs_for_generation = MethodType(
                 _dummy_prepare_inputs_for_generation, model
@@ -132,7 +131,7 @@ def prepare_model(config: Dict[str, Any]):
             ]),
             lora_dropout=lora_config_dict.get("lora_dropout", 0.0),
             bias=lora_config_dict.get("bias", "none"),
-            task_type=lora_config_dict.get("task_type", "CAUSAL_LM")
+            task_type=lora_config_dict.get("task_type", "FEATURE_EXTRACTION")
         )
         
         model = get_peft_model(model, lora_config)
@@ -146,7 +145,6 @@ def prepare_model(config: Dict[str, Any]):
         print("=" * 80)
     
     return model, tokenizer
-
 
 def _pick_timeline_swap_adjacent(seg_len: int, rng: random.Random) -> Tuple[int, int]:
     i = rng.randint(0, seg_len - 2)
@@ -177,13 +175,6 @@ def generate_local_decode_order(
     long_swap_prob: float = HEURISTIC_LONG_SWAP_PROB,
     max_swap_distance: int = HEURISTIC_MAX_SWAP_DISTANCE,
 ) -> List[int]:
-    """Build per-position decode step over **response-local** indices [0, seg_len).
-
-    返回的 ``order`` 语义与 ``unmask_time`` 一致：``order[pos]`` 表示位置 ``pos``
-    在第几步被解码（step index）。从恒等映射出发，重复若干次交换 step 值：
-    以概率 ``long_swap_prob`` 进行 2..max_swap_distance 的长交换，否则交换相邻步。
-    Prompt 不参与该映射。默认超参见模块级 HEURISTIC_* 常量。
-    """
     if seg_len <= 0:
         return []
     if seg_len == 1:
@@ -220,13 +211,6 @@ def heuristic_seg_mask_bool(
     long_swap_prob: float = HEURISTIC_LONG_SWAP_PROB,
     max_swap_distance: int = HEURISTIC_MAX_SWAP_DISTANCE,
 ) -> List[bool]:
-    """Binary mask over a response segment: True = still masked (not yet revealed).
-
-    ``order`` follows ``generate_local_decode_order`` and is interpreted as
-    per-position decode step (same semantics as ``unmask_time``).
-    After k = round((1-mask_ratio)*L), positions with ``order[pos] < k`` are unmasked;
-    positions with ``order[pos] >= k`` stay masked.
-    """
     if seg_len <= 0:
         return []
     order = generate_local_decode_order(
@@ -242,28 +226,6 @@ def heuristic_seg_mask_bool(
     return [order[i] >= num_unmasked for i in range(seg_len)]
 
 
-def random_ratio_seg_mask_bool(
-    seg_len: int,
-    mask_ratio: float,
-    rng: random.Random,
-) -> List[bool]:
-    """按 mask_ratio 随机生成掩码：在响应段内均匀随机选取恰好 k 个位置置为 masked。
-
-    k = round(mask_ratio * seg_len)，并裁剪到 [0, seg_len]。与独立 Bernoulli（use_naive_random_mask）
-    不同，本策略在每个 segment 上**精确**满足（四舍五入后的）掩码个数，仅位置随机。
-    """
-    if seg_len <= 0:
-        return []
-    mr = max(0.0, min(1.0, float(mask_ratio)))
-    k = int(round(mr * seg_len))
-    k = max(1, min(seg_len, k))
-    if k == seg_len:
-        return [True] * seg_len
-    chosen = rng.sample(range(seg_len), k)
-    masked_set = set(chosen)
-    return [i in masked_set for i in range(seg_len)]
-
-
 def forward_process_with_trajectory(
     input_ids,
     prompt_lengths,
@@ -272,7 +234,6 @@ def forward_process_with_trajectory(
     mask_ratio=0.5,
     use_blockwise=False,
     use_naive_random_mask=False,
-    use_random_ratio_mask=False,
     use_heuristic_trajectory=True,
     heuristic_swap_frac=HEURISTIC_SWAP_FRAC,
     heuristic_num_swaps=None,
@@ -283,20 +244,12 @@ def forward_process_with_trajectory(
     sample_indices=None,
     global_step: int = 0,
 ):
-    """Forward masking: heuristic pseudo-trajectory (default)、i.i.d. Bernoulli 或按比例的随机定长掩码。
-
+    """Forward masking using heuristic pseudo-trajectory
+    
     Args:
         use_blockwise: If True, only predict one block; otherwise random mask entire response
-        use_naive_random_mask: If True, 每个位置独立 Bernoulli(mask_ratio)，仅期望比例接近
-        use_random_ratio_mask: If True, 在段内随机选 k=round(mask_ratio*L) 个位置掩码（精确个数）
-        use_heuristic_trajectory: If True (且未启用 naive / random_ratio), use local decode-order heuristic
-        heuristic_swap_frac: number of transposition attempts ≈ swap_frac * segment_length
-        heuristic_num_swaps: if set, fixed number of attempts (overrides swap_frac)
-        heuristic_long_swap_prob: each attempt uses a long swap (timeline distance 2..max) with this probability
-        heuristic_max_swap_distance: max |i-j| for long swaps on the reveal timeline
+        use_naive_random_mask: If True, use naive random masking baseline instead of trajectory selection
         use_complementary_loss: If True, also return complementary masked batch for dParallel loss
-
-    优先级: use_random_ratio_mask > use_naive_random_mask > use_heuristic_trajectory > Bernoulli 回退
     """
     b, l = input_ids.shape
     device = input_ids.device
@@ -341,14 +294,7 @@ def forward_process_with_trajectory(
             + int(mask_ratio * 1e6)
         ) & 0xFFFFFFFF
         rng = random.Random(seed)
-
-        if use_random_ratio_mask:
-            seg_mask = torch.tensor(
-                random_ratio_seg_mask_bool(seg_len, mask_ratio, rng),
-                device=device,
-                dtype=torch.bool,
-            )
-        elif use_naive_random_mask:
+        if use_naive_random_mask:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
         elif use_heuristic_trajectory:
@@ -368,14 +314,7 @@ def forward_process_with_trajectory(
         else:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
-        # print(f"[Debug] sample {i}, seg_mask: {seg_mask}")
-        # print(f"[Debug] sample {i}, seg_len: {seg_len}")
-        # print(f"[Debug] sample {i}, mask_start: {mask_start}")
-        # print(f"[Debug] sample {i}, mask_end: {mask_end}")
-        # print(f"[Debug] sample {i}, mask_ratio: {mask_ratio}")
-        # print(f"[Debug] sample {i}, prompt_len: {prompt_len}")
-        # print(f"[Debug] sample {i}, response_len: {response_len}")
-
+        
         # Apply mask (same logic as dream_train.py)
         masked_indices[i, mask_start:mask_end] = seg_mask
         if use_complementary_loss:
@@ -423,7 +362,6 @@ class DLMTrainer(Trainer):
         max_mask_ratio=0.8,
         use_blockwise_loss=False,
         use_naive_random_mask=False,
-        use_random_ratio_mask=False,
         use_complementary_loss=False,
         use_heuristic_trajectory=True,
         heuristic_swap_frac=HEURISTIC_SWAP_FRAC,
@@ -442,7 +380,6 @@ class DLMTrainer(Trainer):
         self.max_mask_ratio = max_mask_ratio
         self.use_blockwise_loss = use_blockwise_loss
         self.use_naive_random_mask = use_naive_random_mask
-        self.use_random_ratio_mask = use_random_ratio_mask
         self.use_complementary_loss = use_complementary_loss
         self.use_heuristic_trajectory = use_heuristic_trajectory
         self.heuristic_swap_frac = heuristic_swap_frac
@@ -573,7 +510,6 @@ class DLMTrainer(Trainer):
         input_ids = inputs["input_ids"]
         prompt_lengths = inputs["prompt_lengths"]
         sample_indices = inputs["sample_idx"]
-        
         gs = int(self.state.global_step) if self.state is not None else 0
         
         # Get current mask ratio and block size
@@ -581,14 +517,13 @@ class DLMTrainer(Trainer):
         current_mask_ratio = random.uniform(current_mask_ratio, self.max_mask_ratio)
         current_block_size = self.get_current_block_size()
         
-        # Forward masking: heuristic pseudo-trajectory (or i.i.d. random if use_naive_random_mask)
+        # Forward masking with heuristic pseudo-trajectory
         if self.use_complementary_loss:
             noisy_batch, noisy_batch_rev, masked_indices, masked_indices_rev = forward_process_with_trajectory(
                 input_ids, prompt_lengths,
                 mask_token_id=self.mask_token_id, block_size=current_block_size,
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
-                use_random_ratio_mask=self.use_random_ratio_mask,
                 use_heuristic_trajectory=self.use_heuristic_trajectory,
                 heuristic_swap_frac=self.heuristic_swap_frac,
                 heuristic_num_swaps=self.heuristic_num_swaps,
@@ -604,7 +539,6 @@ class DLMTrainer(Trainer):
                 mask_token_id=self.mask_token_id, block_size=current_block_size,
                 mask_ratio=current_mask_ratio, use_blockwise=self.use_blockwise_loss,
                 use_naive_random_mask=self.use_naive_random_mask,
-                use_random_ratio_mask=self.use_random_ratio_mask,
                 use_heuristic_trajectory=self.use_heuristic_trajectory,
                 heuristic_swap_frac=self.heuristic_swap_frac,
                 heuristic_num_swaps=self.heuristic_num_swaps,
@@ -618,14 +552,14 @@ class DLMTrainer(Trainer):
         masked_indices = masked_indices[:, 1:]
         masked_indices_rev = masked_indices_rev[:, 1:] if self.use_complementary_loss else None
         
-        # compute logits（保持与模型一致的 dtype，通常为 bf16；勿对整段 [B,T,V] 转 float32，否则显存约翻倍且 softmax 再占一张同尺寸张量易 OOM）
+        # compute logits
         outputs = model(input_ids=noisy_batch)
-        logits = outputs.logits[:, :-1]
+        logits = outputs.logits[:, :-1].float()  # Convert to FP32 for numerical stability
 
         # compute logits for complementary mask
         if self.use_complementary_loss:
             outputs_rev = model(input_ids=noisy_batch_rev)
-            logits_rev = outputs_rev.logits[:, :-1]
+            logits_rev = outputs_rev.logits[:, :-1].float()  # Convert to FP32 for numerical stability
         
         input_ids = input_ids[:, 1:]
         # Calculate loss: only calculate loss for masked tokens
@@ -634,8 +568,8 @@ class DLMTrainer(Trainer):
             masked_logits = logits[masked_indices]  # [num_masked, vocab_size]
             masked_labels = input_ids[masked_indices]  # [num_masked]
             
-            # 仅在 masked 子集上转 FP32，数值更稳且不把整段序列升到 float32
-            ce_loss = F.cross_entropy(masked_logits.float(), masked_labels)
+            # cross entropy loss with automatic mean reduction
+            ce_loss = F.cross_entropy(masked_logits, masked_labels)
         else:
             ce_loss = 0.0 * logits.sum()
         
@@ -646,7 +580,7 @@ class DLMTrainer(Trainer):
             masked_labels_rev = input_ids[masked_indices_rev]  # [num_masked]
             
             # cross entropy loss with automatic mean reduction
-            ce_loss_rev = F.cross_entropy(masked_logits_rev.float(), masked_labels_rev)
+            ce_loss_rev = F.cross_entropy(masked_logits_rev, masked_labels_rev)
         else:
             ce_loss_rev = 0.0 * logits.sum() if self.use_complementary_loss else 0.0 * logits.sum()
         
@@ -654,8 +588,8 @@ class DLMTrainer(Trainer):
         if masked_indices.sum() > 0:
             # Calculate the probability and entropy of each position
             # Note: argmax is not affected by temperature; logits/probs are equivalent.
-            probs = F.softmax(logits / self.temperature, dim=-1)  # [B, T, V]，与 logits 同 dtype，避免额外 FP32 全词表张量
-            H_tok = -(probs * (probs.clamp_min(1e-12)).log()).sum(dim=-1)  # [B, T]
+            probs = F.softmax(logits / self.temperature, dim=-1)  # [B, T, V]
+            H_tok = -(probs * torch.log(probs + 1e-12)).sum(dim=-1)  # [B, T]
             
             # predictions
             pred_ids = logits.argmax(dim=-1)  # [B, T]
@@ -677,7 +611,7 @@ class DLMTrainer(Trainer):
             # Calculate the probability and entropy of each position
             # Note: argmax is not affected by temperature; logits/probs are equivalent.
             probs_rev = F.softmax(logits_rev / self.temperature, dim=-1)  # [B, T, V]
-            H_tok_rev = -(probs_rev * (probs_rev.clamp_min(1e-12)).log()).sum(dim=-1)  # [B, T]
+            H_tok_rev = -(probs_rev * torch.log(probs_rev + 1e-12)).sum(dim=-1)  # [B, T]
             
             # predictions
             pred_ids_rev = logits_rev.argmax(dim=-1)  # [B, T]
@@ -786,36 +720,14 @@ def main():
     if distill_config.get("heuristic_swap_frac") is not None:
         heuristic_swap_frac = float(distill_config["heuristic_swap_frac"])
     else:
-        # 兼容旧键 heuristic_jump_prob（量级相近时可沿用）
         heuristic_swap_frac = float(distill_config.get("heuristic_jump_prob", HEURISTIC_SWAP_FRAC))
     _ns = distill_config.get("heuristic_num_swaps")
     heuristic_num_swaps: Optional[int] = None if _ns is None else int(_ns)
     heuristic_long_swap_prob = float(distill_config.get("heuristic_long_swap_prob", HEURISTIC_LONG_SWAP_PROB))
     heuristic_max_swap_distance = int(distill_config.get("heuristic_max_swap_distance", HEURISTIC_MAX_SWAP_DISTANCE))
-    use_random_ratio_mask = bool(distill_config.get("use_random_ratio_mask", False))
-    use_naive_random_mask_cfg = bool(distill_config.get("use_naive_random_mask", False))
-    print(
-        "Masking: "
-        + (
-            "random k-mask by mask_ratio (uniform positions, k=round(ratio*L))"
-            if use_random_ratio_mask
-            else (
-                "naive i.i.d. Bernoulli per token"
-                if use_naive_random_mask_cfg
-                else (
-                    "heuristic pseudo-trajectory "
-                    f"(enabled={use_heuristic_trajectory}, swap_frac={heuristic_swap_frac}, "
-                    f"num_swaps={heuristic_num_swaps}, long_swap_prob={heuristic_long_swap_prob}, "
-                    f"max_swap_distance={heuristic_max_swap_distance})"
-                )
-            )
-        )
-        + ". Reveal/mask is response-local only; prompt is not reordered."
-    )
     
-    # 2. Load the original dataset
-    # dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
-    dataset = load_dataset("d3LLM/Ling-Coder-dParallel-merged-512-120k", split="train")
+    # 3. Load the original dataset 修改，这里的逻辑是什么？
+    dataset = load_dataset("Zigeng/dParallel_Dream_Distill_Data", split="train")
     
     # Limit dataset size for testing if max_samples is specified
     max_samples = distill_config.get("max_samples")
@@ -835,7 +747,7 @@ def main():
     cache_params = {
         "model_name": config["model"]["name"],
         "max_samples": max_samples,
-        "max_length": distill_config.get("max_length", 1000),
+        "max_length": distill_config.get("max_length", 512),
         "dataset_size": len(dataset),
     }
     cache_key_str = str(cache_params).encode()
@@ -866,7 +778,7 @@ def main():
             texts = []
             prompt_lengths = []
             
-            for question, response in zip(example["question"], example["llm_response"]):
+            for question, response in zip(example["question"], example["llm_response"]): # 只用了question和llm_response
                 # prompt text
                 messages = [{"role": "user", "content": question}]
                 prompt_text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -895,12 +807,13 @@ def main():
                 examples["text"],
                 truncation=True,
                 padding=False,
-                max_length=distill_config.get("max_length", 1000),
+                max_length=distill_config.get("max_length", 512),
                 add_special_tokens=False,
             )
             
             tokenized["prompt_lengths"] = examples["prompt_length"]
             
+            # Store original dataset index for dynamic trajectory loading during training
             tokenized["sample_idx"] = list(indices)
             
             return tokenized
@@ -920,11 +833,7 @@ def main():
             print(f"Tokenized dataset cache saved successfully!")
         except Exception as e:
             print(f"Warning: Failed to save tokenized dataset cache: {e}")
-
-    # Print max prompt_lengths
-    max_prompt_length = max(tokenized_dataset["prompt_lengths"])
-    print(f"Max prompt length: {max_prompt_length}")
-
+    
     from dataclasses import dataclass
     from typing import Dict, List, Any
     
@@ -937,7 +846,7 @@ def main():
             prompt_lengths = [f["prompt_lengths"] for f in features]
             sample_indices = [f["sample_idx"] for f in features]
             
-            target_length = 512 + max(prompt_lengths)
+            target_length = 256 + max(prompt_lengths)
             
             pad_token_id = self.tokenizer.eos_token_id
             
@@ -945,6 +854,7 @@ def main():
             padded_input_ids = []
             for ids in input_ids:
                 current_length = len(ids)
+                # print(f"[Debug-1] current_length: {current_length}, target_length: {target_length}")
                 if current_length < target_length:
                     # Right padding with EOS token
                     padding_length = target_length - current_length
@@ -997,7 +907,6 @@ def main():
         max_mask_ratio=distill_config.get("max_mask_ratio", 0.8),
         use_blockwise_loss=distill_config.get("use_blockwise_loss", False),
         use_naive_random_mask=distill_config.get("use_naive_random_mask", False),
-        use_random_ratio_mask=distill_config.get("use_random_ratio_mask", False),
         use_complementary_loss=distill_config.get("use_complementary_loss", False),
         use_heuristic_trajectory=use_heuristic_trajectory,
         heuristic_swap_frac=heuristic_swap_frac,
