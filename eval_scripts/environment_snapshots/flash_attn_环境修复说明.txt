@@ -1,0 +1,42 @@
+问题
+----
+曾安装预编译包 flash_attn 2.8.3+cu124torch2.5，与当前 torch 2.9.1+cu128 的 libtorch ABI 不一致，
+import flash_attn_2_cuda 时出现 undefined symbol（c10::Error 等）。
+
+已做修复（2026-04-11）
+----------------------
+1. pip uninstall -y flash-attn
+2. 在 conda 环境 diffusion-llm 内设置 CUDA_HOME=$CONDA_PREFIX（与 nvcc 12.8 一致）
+3. MAX_JOBS=4 pip install flash-attn==2.8.3 --no-cache-dir --no-build-isolation
+
+从 PyPI 拉取源码并在本机针对当前 torch/CUDA 重新编译，安装后版本显示为 2.8.3（无 +cu124torch2.5 后缀）。
+
+完整终端与 pip 输出见：flash_attn_rebuild_20260411_153935.log（构建约 49 分钟，因同时为 sm80/90/100/120 生成大量内核）。
+
+验证
+----
+  conda activate diffusion-llm
+  python -c "import flash_attn; from flash_attn.flash_attn_interface import flash_attn_func; ..."
+
+日后升级 PyTorch 时
+------------------
+务必同步重装 flash-attn（同上源码安装），否则极易再次出现 .so 与 torch 不匹配。
+
+CXXABI_1.3.15 / libstdc++（运行时）
+----------------------------------
+若报错：/lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15' not found，
+说明扩展需要 conda 内较新的 libstdc++，但动态链接器先加载了系统旧库。
+
+已做：
+1) 在 conda 环境 diffusion-llm 增加 activate.d / deactivate.d：
+   etc/conda/activate.d/zz_libstdcxx_for_flash_attn.sh
+   etc/conda/deactivate.d/zz_libstdcxx_for_flash_attn.sh
+   （将 $CONDA_PREFIX/lib 置于 LD_LIBRARY_PATH 最前，退出环境时恢复原值。）
+2) 仓库 eval_scripts/run_code_eval.sh 开头在存在 CONDA_PREFIX 时同样前置该路径，
+   避免未重新 conda activate 时仍踩坑。
+
+新终端请先 conda activate diffusion-llm 再跑评测；或直接用 bash eval_scripts/run_code_eval.sh（脚本会补 LD_LIBRARY_PATH）。
+
+可选加速（仅编译本机 GPU 架构）
+------------------------------
+若仅需 Ada（sm89）等，可在安装前查阅 flash-attention 文档中的 CUDA arch 环境变量，减少 gencode 数量以缩短编译时间。

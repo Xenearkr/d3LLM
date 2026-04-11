@@ -12,6 +12,15 @@
 #
 set -euo pipefail
 
+# conda 内编译的 CUDA 扩展（如 flash_attn）常依赖较新的 libstdc++（CXXABI_1.3.15 等）。
+# 若 LD_LIBRARY_PATH 未把 $CONDA_PREFIX/lib 放在最前，运行时可能先加载系统 /lib/.../libstdc++.so.6 而 ImportError。
+if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":${CONDA_PREFIX}/lib:"*) ;;
+        *) export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+    esac
+fi
+
 # REPO_ROOT：必须基于「本脚本」的绝对路径解析。若仅用 cd "$(dirname "${BASH_SOURCE[0]}")/.."，
 # 在 BASH_SOURCE 为相对路径时，会相对于当前工作目录 cd，cwd 不在仓库根时会得到错误的 REPO_ROOT，
 # 进而 EVALPLUS_ROOT 指向不存在的位置，出现 No module named evalplus.evaluate。

@@ -1,0 +1,54 @@
+=== conda env export (explicit) ===
+name: diffusion-llm
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+=== pip freeze ===
+=== python ===
+Python 3.10.19
+=== torch ===
+torch 2.9.1+cu128
+cuda available True
+cuda runtime 12.8
+device NVIDIA RTX 6000 Ada Generation
+cudnn 91002
+=== flash_attn import ===
+IMPORT_ERROR: ImportError('/home/u-liujc/anaconda3/envs/diffusion-llm/lib/python3.10/site-packages/flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so: undefined symbol: _ZN3c105ErrorC2ENS_14SourceLocationESs')
+=== pip show flash-attn torch transformers ===
+Name: flash_attn
+Version: 2.8.3+cu124torch2.5
+Summary: Flash Attention: Fast and Memory-Efficient Exact Attention
+Home-page: https://github.com/Dao-AILab/flash-attention
+Author: Tri Dao
+Author-email: tri@tridao.me
+License: 
+Location: /home/u-liujc/anaconda3/envs/diffusion-llm/lib/python3.10/site-packages
+Requires: einops, torch
+Required-by: 
+---
+Name: torch
+Version: 2.9.1
+Summary: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+Home-page: https://pytorch.org
+Author: 
+Author-email: PyTorch Team <packages@pytorch.org>
+License: BSD-3-Clause
+Location: /home/u-liujc/anaconda3/envs/diffusion-llm/lib/python3.10/site-packages
+Requires: filelock, fsspec, jinja2, networkx, nvidia-cublas-cu12, nvidia-cuda-cupti-cu12, nvidia-cuda-nvrtc-cu12, nvidia-cuda-runtime-cu12, nvidia-cudnn-cu12, nvidia-cufft-cu12, nvidia-cufile-cu12, nvidia-curand-cu12, nvidia-cusolver-cu12, nvidia-cusparse-cu12, nvidia-cusparselt-cu12, nvidia-nccl-cu12, nvidia-nvjitlink-cu12, nvidia-nvshmem-cu12, nvidia-nvtx-cu12, sympy, triton, typing-extensions
+Required-by: accelerate, auto_gptq, bert-score, bytecheckpoint, cache_dit, compressed-tensors, deepspeed, flash_attn, flashinfer-python, hidet, liger_kernel, lightning, lm_eval, lmflow, optimum, outlines, peft, pytorch-lightning, quack-kernels, radgraph, runai-model-streamer, sentence-transformers, sgl-fa4, sglang, st-attn, tensordict, tilus, timm, torch_c_dlpack_ext, torchaudio, torchdata, torchmetrics, torchvision, transformer-lens, vsa, xgrammar
+---
+Name: transformers
+Version: 4.57.1
+Summary: State-of-the-art Machine Learning for JAX, PyTorch and TensorFlow
+Home-page: https://github.com/huggingface/transformers
+Author: The Hugging Face team (past and future) with the help of all our contributors (https://github.com/huggingface/transformers/graphs/contributors)
+Author-email: transformers@huggingface.co
+License: Apache 2.0 License
+Location: /home/u-liujc/anaconda3/envs/diffusion-llm/lib/python3.10/site-packages
+Requires: filelock, huggingface-hub, numpy, packaging, pyyaml, regex, requests, safetensors, tokenizers, tqdm
+Required-by: auto_gptq, bert-score, cache_dit, compressed-tensors, lm_eval, optimum, peft, radgraph, sae-lens, sentence-transformers, sglang, stop-sequencer, transformer-lens, transformers-stream-generator, veomni, verl, xgrammar
+=== nvidia-smi (short) ===
+NVIDIA RTX 6000 Ada Generation, 550.107.02
+NVIDIA RTX 6000 Ada Generation, 550.107.02
+NVIDIA RTX 6000 Ada Generation, 550.107.02
