@@ -1,0 +1,63 @@
+# 在 Hugging Face 上的 d3LLM Dream Coder 权重上继续微调（LoRA + 伪轨迹蒸馏）
+# 伪轨迹：可填一个或多个 HF 数据集 id 或本地 Arrow 目录（与 distill_2_coder_{APPS,ds1000,bytedanceseed} 中一致）
+# 学习率与 distill_2_coder_training_512/d3llm_train.yaml 同量级（小 LR 微调）
+
+model:
+  name: "d3LLM/d3LLM_Dream_Coder"
+  trust_remote_code: true
+  torch_dtype: "bfloat16"
+
+training:
+  output_dir: "output_model/d3LLM_DREAM_Coder_finetune_pseudo"
+  num_train_epochs: 3
+  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 1
+  logging_steps: 10
+  learning_rate: 0.00001
+  weight_decay: 0.01
+  bf16: true
+  optim: "adamw_torch"
+  warmup_ratio: 0.05
+  max_grad_norm: 1
+  group_by_length: false
+  lr_scheduler_type: "cosine"
+  save_strategy: "epoch"
+  report_to: "wandb"
+  run_name: "d3llm_dream_coder_finetune_pseudo"
+  logging_first_step: true
+
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 16
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  lora_dropout: 0.0
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+distillation:
+  # 多源：按顺序拼接；单源可只保留一项或改用 trajectory_dataset_path（见脚本）
+  trajectory_dataset_paths:
+    - "XenonGas/dream_coder_trajectory_apps"
+    - "XenonGas/dream_coder_trajectory_ds1000"
+    # - "XenonGas/dream_coder_trajectory_bytedanceseed"
+  # 与 Ling 格式对齐：用伪轨迹里的文本列作为 teacher response（与 d3llm_dream_train 中 llm_response 对应）
+  text_response_field: "llm_answer"
+  max_length: 1000
+  max_samples: null
+  use_blockwise_loss: true
+  use_naive_random_mask: false
+  use_complementary_loss: false
+  progressive_block_sizes: [16, 24, 32]
+  min_mask_ratio: 0.0
+  max_mask_ratio: 0.8
+  temperature: 0.5
+  entropy_weight: 1.0
+  num_proc: 16
