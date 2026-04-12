@@ -1,14 +1,49 @@
 import gzip
 import json
 import os
+import ssl
+import urllib.request
 from os import PathLike
 from typing import Dict, Iterable
 
 import tempdir
-import wget
 from appdirs import user_cache_dir
 
 CACHE_DIR = user_cache_dir("evalplus")
+
+
+def _ssl_context_for_download() -> ssl.SSLContext:
+    """Pick a CA bundle that works on conda / minimal images (wget.download often fails verify)."""
+    env_bundle = os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE")
+    if env_bundle and os.path.isfile(env_bundle):
+        return ssl.create_default_context(cafile=env_bundle)
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    cap = os.path.join(conda_prefix, "ssl", "cacert.pem") if conda_prefix else ""
+    if cap and os.path.isfile(cap):
+        ctx = ssl.create_default_context()
+        ctx.load_verify_locations(cap)
+        return ctx
+    return ssl.create_default_context()
+
+
+def download_url(url: str, dest_path: str, timeout: int = 300) -> None:
+    """Download ``url`` to ``dest_path`` (binary) with explicit CA selection."""
+    dest_path = os.path.abspath(dest_path)
+    parent = os.path.dirname(dest_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    ctx = _ssl_context_for_download()
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (evalplus-data)"})
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        data = resp.read()
+    with open(dest_path, "wb") as f:
+        f.write(data)
 
 
 def get_dataset_metadata(name: str, version: str, mini: bool, noextreme: bool = False):
@@ -31,7 +66,7 @@ def make_cache(gzip_url, cache_path):
         print(f"Downloading dataset from {gzip_url}")
         with tempdir.TempDir() as tmpdir:
             plus_gz_path = os.path.join(tmpdir, f"data.jsonl.gz")
-            wget.download(gzip_url, plus_gz_path)
+            download_url(gzip_url, plus_gz_path)
 
             with gzip.open(plus_gz_path, "rb") as f:
                 plus = f.read().decode("utf-8")
