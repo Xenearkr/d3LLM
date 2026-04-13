@@ -13,7 +13,7 @@ training:
   gradient_accumulation_steps: 8
   per_device_train_batch_size: 1
   logging_steps: 10
-  learning_rate: 2.0e-06
+  learning_rate: 0.0001
   weight_decay: 0.01
   bf16: true
   optim: "adamw_torch"
@@ -45,7 +45,7 @@ lora:
 distillation:
   # 多源：按顺序拼接；单源可只保留一项或改用 trajectory_dataset_path（见脚本）
   trajectory_dataset_paths:
-    - "XenonGas/dream_coder_trajectory_apps"
+    # - "XenonGas/dream_coder_trajectory_apps"
     - "XenonGas/dream_coder_trajectory_ds1000"
     # - "XenonGas/dream_coder_trajectory_bytedanceseed"
   # 与 Ling 格式对齐：用伪轨迹里的文本列作为 teacher response（与 d3llm_dream_train 中 llm_response 对应）

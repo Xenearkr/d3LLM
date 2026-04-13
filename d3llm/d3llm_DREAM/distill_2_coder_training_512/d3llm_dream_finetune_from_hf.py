@@ -153,33 +153,32 @@ def prepare_model(config: Dict[str, Any]):
     return model, tokenizer
 
 
-def select_trajectory_by_ratio(trajectories, mask_ratio, mask_token_id, block_start, block_end):
-    """Select the trajectory step with mask ratio closest to target mask ratio in the current block
-    
-    Args:
-        trajectories: List of trajectory steps (each step is a full sequence)
-        mask_ratio: Target mask ratio [0, 1]
-        mask_token_id: ID of the mask token (not used, kept for API compatibility)
-        block_start: Start index of current block
-        block_end: End index of current block
-    
-    Returns:
-        The trajectory step with the closest mask ratio in the specified block region
-    """
-    if not trajectories or len(trajectories) == 0:
+def select_trajectory_by_ratio(decode_order, mask_ratio, mask_token_id, mask_start, mask_end):
+    """Build boolean seg_mask from decode-order trajectory."""
+    if not decode_order:
         return None
-    
-    # Trajectories are ordered by denoising steps (from fully masked to clean)
-    # Calculate the target number of unmasked tokens in the current block
-    block_length = block_end - block_start
-    num_unmasked = int((1 - mask_ratio) * block_length)
-    
-    # Map to trajectory index: earlier steps have more masks
-    # index = block_start + number of unmasked tokens so far
-    target_idx = block_start + num_unmasked
-    target_idx = min(target_idx, len(trajectories) - 1)
-    
-    return trajectories[target_idx]
+
+    block_orders = decode_order[mask_start:mask_end]
+    block_len = len(block_orders)
+    valid_positions = [(idx, order) for idx, order in enumerate(block_orders) if order > 0]
+
+    if len(valid_positions) == 0:
+        return [False] * block_len
+
+    num_valid = len(valid_positions)
+    num_unmasked = int((1 - mask_ratio) * num_valid)
+    num_unmasked = max(0, min(num_unmasked, num_valid))
+
+    valid_positions_sorted = sorted(valid_positions, key=lambda x: x[1])
+    visible_pos = set(idx for idx, _ in valid_positions_sorted[:num_unmasked])
+
+    seg_mask = []
+    for idx, order in enumerate(block_orders):
+        if order <= 0:
+            seg_mask.append(False)
+        else:
+            seg_mask.append(idx not in visible_pos)
+    return seg_mask
 
 
 def naive_random_mask(trajectories, mask_ratio, mask_token_id, block_start, block_end):
@@ -239,26 +238,21 @@ def forward_process_with_trajectory(
             mask_start = prompt_len
             mask_end = l
         
-        # Get trajectory or use random masking
-        traj_fn = naive_random_mask if use_naive_random_mask else select_trajectory_by_ratio
-        traj_step = traj_fn(
-            trajectory_batch[i], mask_ratio, mask_token_id, mask_start - prompt_len, mask_end - prompt_len
-        )
-        
-        # Extract or generate seg_mask
+        # Build seg_mask from decode-order trajectory or random fallback
         seg_len = mask_end - mask_start
-        if traj_step is not None:
-            traj_tensor = torch.tensor(traj_step, device=device, dtype=torch.long)
-            # collator 可能将序列 pad 到 512+max(prompt) > 轨迹预处理长度，避免切片长度与 seg_len 不一致
-            tl = traj_tensor.numel()
-            if tl < l:
-                traj_tensor = torch.cat([traj_tensor, input_ids[i, tl:l].clone()], dim=0)
-            elif tl > l:
-                traj_tensor = traj_tensor[:l]
-            seg_mask = (traj_tensor[mask_start:mask_end] == mask_token_id)
-        else:
+        if use_naive_random_mask:
             p_mask = (1 - eps) * mask_ratio + eps
             seg_mask = torch.rand(seg_len, device=device) < p_mask
+        else:
+            decode_order = trajectory_batch[i]
+            seg_mask_list = select_trajectory_by_ratio(
+                decode_order, mask_ratio, mask_token_id, mask_start, mask_end
+            )
+            if seg_mask_list is None:
+                p_mask = (1 - eps) * mask_ratio + eps
+                seg_mask = torch.rand(seg_len, device=device) < p_mask
+            else:
+                seg_mask = torch.tensor(seg_mask_list, device=device, dtype=torch.bool)
         # print(f"[Debug] sample {i}, seg_mask: {seg_mask}")
         # print(f"[Debug] sample {i}, seg_len: {seg_len}")
         # print(f"[Debug] sample {i}, mask_start: {mask_start}")
@@ -266,8 +260,6 @@ def forward_process_with_trajectory(
         # print(f"[Debug] sample {i}, mask_ratio: {mask_ratio}")
         # print(f"[Debug] sample {i}, prompt_len: {prompt_len}")
         # print(f"[Debug] sample {i}, response_len: {response_len}")
-        # print(f"[Debug] sample {i}, len traj_step: {len(traj_step)}")
-        # print(f"[Debug] sample {i}, len trajectory_tensor: {len(traj_tensor)}")
 
         # Apply mask (same logic as dream_train.py)
         if seg_len > 0:
@@ -461,11 +453,19 @@ class DLMTrainer(Trainer):
         # Dynamically load trajectories from trajectory_dataset based on sample_idx
         trajectories = []
         for idx in sample_indices.cpu().tolist():
-            if self.trajectory_dataset is not None and idx < len(self.trajectory_dataset):
-                traj = self.trajectory_dataset[idx]["trajectory"]
+            if self.trajectory_dataset is None:
+                decode_order = []
             else:
-                traj = []
-            trajectories.append(traj)
+                assert idx < len(self.trajectory_dataset), f"sample_idx {idx} out of range"
+                traj = self.trajectory_dataset[idx]["trajectory"]
+                if not traj:
+                    decode_order = []
+                elif len(traj) == 1 and isinstance(traj[0], list):
+                    decode_order = traj[0]
+                else:
+                    # Backward compatibility: old full-trajectory format.
+                    decode_order = traj[0] if isinstance(traj[0], list) else []
+            trajectories.append(decode_order)
         
         # Get current mask ratio and block size
         current_mask_ratio = self.get_current_mask_ratio()
@@ -728,23 +728,25 @@ def main():
         if "question" not in trajectory_dataset.column_names:
             raise ValueError("伪轨迹数据集需包含 question 列")
 
-        pad_token_id = tokenizer.eos_token_id
-
         def preprocess_trajectory_sample(examples):
             processed_trajectories = []
             for traj in examples["trajectory"]:
-                if traj:
-                    padded_traj = []
-                    for step in traj:
-                        if len(step) < max_length:
-                            padding_length = max_length - len(step)
-                            padded_step = step + [pad_token_id] * padding_length
-                        else:
-                            padded_step = step[:max_length]
-                        padded_traj.append(padded_step)
-                    processed_trajectories.append(padded_traj)
-                else:
+                if not traj:
                     processed_trajectories.append([])
+                    continue
+                # decode-order format: trajectory = [decode_order]
+                if len(traj) == 1 and isinstance(traj[0], list):
+                    decode_order = traj[0]
+                else:
+                    # backward compatibility with old full-trajectory format
+                    decode_order = traj[0] if isinstance(traj[0], list) else []
+                if len(decode_order) < max_length:
+                    padding_length = max_length - len(decode_order)
+                    padded_order = decode_order + [0] * padding_length
+                else:
+                    padded_order = decode_order[:max_length]
+                # keep nested structure to match dataset schema
+                processed_trajectories.append([padded_order])
             return {"trajectory": processed_trajectories}
 
         print(f"Preprocessing trajectories (max_length={max_length})...")
