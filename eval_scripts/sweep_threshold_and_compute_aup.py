@@ -10,16 +10,18 @@ python eval_scripts/sweep_threshold_and_compute_aup.py gsm8k_cot_zeroshot \
   --dream_or_ladda ladda
 
 脚本行为:
-- 从 threshold=0.0 开始，每次增加 0.1 调用 run_merged_d3llm_llada_eval.sh 或 run_merged_d3llm_dream_eval.sh（由 --dream_or_ladda 决定）
+- 从 threshold=0.0 开始，每次增加 0.1 调用统一入口 run_code_eval.sh（dream/ladda/dream_coder）
 - 记录每个 threshold 得到的 (TPF, Acc)
 - 如果当前 Acc < 历史最大 Acc - 5，则停止继续增大 threshold
 - 不在脚本内计算 AUP，而是写出 AUP_leaderboard 可直接读取的 YAML 格式数据
 """
 
 import argparse
+import glob
 import os
 import re
 import subprocess
+import sys
 from typing import List, Tuple
 import yaml
 
@@ -31,43 +33,85 @@ def run_single_eval(
     threshold: float,
     dream_or_ladda: str,
     merged_model: str,
+    force_rerun: bool = True,
 ) -> Tuple[float, float]:
-    """
-    调用对应的 run_merged_d3llm_*.sh，返回 (TPF, Acc)。
-    """
+    """调用统一评测入口，返回 (TPF, Acc)。"""
     if dream_or_ladda == "ladda":
-        script_path = "eval_scripts/run_merged_d3llm_llada_eval.sh"
+        cmd = [
+            "bash",
+            "eval_scripts/run_merged_d3llm_llada_eval.sh",
+            task_name,
+            str(max_new_tokens),
+            str(diffusion_steps),
+            str(threshold),
+            merged_model,
+        ]
     elif dream_or_ladda == "dream":
-        script_path = "eval_scripts/run_merged_d3llm_dream_eval.sh"
+        cmd = [
+            "bash",
+            "eval_scripts/run_code_eval.sh",
+            "diffllm",
+            merged_model,
+            task_name,
+            str(max_new_tokens),
+            str(diffusion_steps),
+            str(threshold),
+        ]
+    elif dream_or_ladda == "dream_coder":
+        if force_rerun:
+            _clear_evalplus_cache(
+                model=merged_model,
+                dataset=task_name,
+                max_new_tokens=max_new_tokens,
+                threshold=threshold,
+            )
+        cmd = [
+            "bash",
+            "eval_scripts/run_code_eval.sh",
+            "diffllm_coder",
+            merged_model,
+            task_name,
+            str(max_new_tokens),
+            str(diffusion_steps),
+            str(threshold),
+        ]
     else:
-        raise ValueError(f"dream_or_ladda 只能是 'dream' 或 'ladda'，当前: {dream_or_ladda}")
+        raise ValueError(f"dream_or_ladda 只能是 'dream' / 'ladda' / 'dream_coder'，当前: {dream_or_ladda}")
 
-    cmd = [
-        "bash",
-        script_path,
-        task_name,
-        str(max_new_tokens),
-        str(diffusion_steps),
-        str(threshold),
-        merged_model,
-    ]
-
-    proc = subprocess.run(
+    # 实时转发子进程输出，避免长时间无日志（尤其是评测进度条阶段）
+    merged_lines: List[str] = []
+    proc = subprocess.Popen(
         cmd,
-        check=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
+        universal_newlines=True,
     )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        merged_lines.append(line)
+    return_code = proc.wait()
+    merged_output = "".join(merged_lines)
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, cmd, output=merged_output)
 
     tpf = None
     metric_pairs: List[Tuple[str, float]] = []
-    for line in proc.stdout.splitlines():
+    for line in merged_output.splitlines():
         line = line.strip()
-        # 运行日志中会多次出现 Tokens per forward，取最后一次
-        if "Tokens per forward" in line:
-            m_tpf = re.search(r"Tokens per forward:\s*([0-9]+(?:\.[0-9]+)?)", line)
-            if m_tpf:
-                tpf = float(m_tpf.group(1))
+        # 运行日志中会多次出现吞吐指标，取最后一次。
+        # dream/ladda 常见: Tokens per forward
+        # dream_coder(evalplus) 常见: Overall token per step / Token per step
+        m_tpf = re.search(
+            r"(?:Tokens per forward|Overall token per step|Token per step):\s*([0-9]+(?:\.[0-9]+)?)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if m_tpf:
+            tpf = float(m_tpf.group(1))
             continue
 
         # 简要结果中的指标行，形如: "exact_match,none: 0.123456"
@@ -96,6 +140,14 @@ def run_single_eval(
                 acc = v
                 break
 
+    # dream_coder(evalplus) 常见 pass@1 指标
+    if acc is None:
+        for k, v in metric_pairs:
+            kl = k.lower().replace(" ", "")
+            if "pass@1" in kl and "stderr" not in kl:
+                acc = v
+                break
+
     # 回退：首个非 stderr 指标
     if acc is None:
         for k, v in metric_pairs:
@@ -103,12 +155,62 @@ def run_single_eval(
                 acc = v
                 break
 
-    if tpf is None or acc is None:
+    if acc is None:
         raise RuntimeError(
-            f"无法从脚本输出中解析 TPF/Acc，threshold={threshold}, 输出如下：\n{proc.stdout}"
+            f"无法从脚本输出中解析 Acc，threshold={threshold}\n"
+            f"命令: {' '.join(cmd)}\n"
+            f"stdout+stderr:\n{merged_output}"
+        )
+    if tpf is None:
+        raise RuntimeError(
+            f"无法从脚本输出中解析 TPF（Tokens per forward / token per step），threshold={threshold}\n"
+            f"命令: {' '.join(cmd)}\n"
+            f"stdout+stderr:\n{merged_output}"
         )
 
     return tpf, acc
+
+
+def _evalplus_identifier(model: str, max_new_tokens: int, threshold: float) -> str:
+    """Keep naming aligned with evalplus.codegen.run_codegen identifier."""
+    identifier = model.strip("./").replace("/", "--") + "_dllm_temp_0.0"
+    identifier += f"_len_{max_new_tokens}"
+    identifier += "_alg_entropy_threshold"
+    # add threshold suffix to avoid different thresholds sharing the same cache key
+    identifier += f"_thr_{threshold:.2f}"
+    return identifier
+
+
+def _clear_evalplus_cache(model: str, dataset: str, max_new_tokens: int, threshold: float) -> None:
+    """Delete cached evalplus artifacts for a specific model+dataset+threshold run."""
+    identifier = _evalplus_identifier(model, max_new_tokens, threshold)
+    removed = 0
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    # evalplus 的 root 默认是当前工作目录下的 evalplus_results（run_code_eval.sh 在 code_eval 目录执行）
+    # 同时兼容旧目录结构，避免路径差异导致“以为清了缓存、实际没清掉”。
+    roots = [
+        os.path.join(repo_root, "utils", "utils_DreamCoder", "code_eval", "evalplus_results", dataset),
+        os.path.join(repo_root, "utils", "utils_DreamCoder", "code_eval", "evalplus", "evalplus_results", dataset),
+        os.path.join(os.getcwd(), "evalplus_results", dataset),
+    ]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for p in glob.glob(os.path.join(root, f"{identifier}*")):
+            try:
+                os.remove(p)
+                removed += 1
+            except IsADirectoryError:
+                continue
+            except FileNotFoundError:
+                continue
+    if removed > 0:
+        print(f"[force_rerun] 已清理 {removed} 个缓存文件: {identifier}*")
+    else:
+        print(
+            f"[force_rerun] 未找到可清理缓存: {identifier}*；"
+            f"已检查目录: {', '.join(roots)}"
+        )
 
 
 def to_percent_if_needed(acc: float) -> float:
@@ -121,7 +223,7 @@ def to_percent_if_needed(acc: float) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "自动扫描 threshold，并调用 run_merged_d3llm_llada_eval.sh 或 run_merged_d3llm_dream_eval.sh。"
+            "自动扫描 threshold，并调用 run_code_eval.sh 的统一入口（dream/ladda/dream_coder）。"
             "将 (TPF,Acc) 写成 AUP_leaderboard 可直接读取的 YAML 数据。"
         )
     )
@@ -131,6 +233,18 @@ def main() -> None:
         type=float,
         default=0.0,
         help="threshold 的初始值（默认: 0）",
+    )
+    parser.add_argument(
+        "--threshold_end",
+        type=float,
+        default=1.0,
+        help="threshold 的结束值（默认: 1.0，含端点）",
+    )
+    parser.add_argument(
+        "--threshold_step",
+        type=float,
+        default=0.1,
+        help="threshold 步长（默认: 0.1）",
     )
     parser.add_argument(
         "--max_new_tokens",
@@ -160,14 +274,28 @@ def main() -> None:
         "--dream_or_ladda",
         type=str,
         required=True,
-        choices=["dream", "ladda"],
-        help="选择 dream 或 ladda（决定调用哪个 run_merged_d3llm_*.sh，且注入对应环境变量）。",
+        choices=["dream", "ladda", "dream_coder"],
+        help="选择 dream / ladda / dream_coder（决定调用哪条统一评测链路）。",
     )
     parser.add_argument(
         "--out_yaml",
         type=str,
         default="AUP_leaderboard/data_custom.yaml",
         help="输出 YAML 路径（默认: AUP_leaderboard/data_custom.yaml）",
+    )
+    parser.add_argument(
+        "--allow_cache",
+        action="store_true",
+        help="允许复用历史评测缓存（默认关闭，会强制重跑）。",
+    )
+    parser.add_argument(
+        "--early_stop_drop",
+        type=float,
+        default=None,
+        help=(
+            "可选：若设置该值（如 5），当 Acc 低于历史最大值该幅度时提前停止。"
+            "默认关闭，保证完整扫完阈值区间。"
+        ),
     )
 
     args = parser.parse_args()
@@ -176,13 +304,21 @@ def main() -> None:
     max_acc: float = -1.0
 
     threshold = float(args.threshold_init)
+    threshold_end = float(args.threshold_end)
+    threshold_step = float(args.threshold_step)
+    if threshold_step <= 0:
+        raise ValueError("--threshold_step 必须 > 0")
+    if threshold > threshold_end:
+        raise ValueError("--threshold_init 不能大于 --threshold_end")
 
     print(
-        f"从 threshold={threshold:.2f} 开始，每次增加 0.1，直到 Acc 低于当前最大 Acc 5 以上为止；"
+        f"从 threshold={threshold:.2f} 开始，每次增加 {threshold_step:.4f}，直到 threshold>{threshold_end:.2f} 为止；"
         f"模式={args.dream_or_ladda}，merged_model={args.merged_model}"
     )
+    if args.early_stop_drop is not None:
+        print(f"已启用早停：当 Acc 低于历史最大值 {args.early_stop_drop:.4f} 时停止。")
 
-    while True:
+    while threshold <= threshold_end + 1e-12:
         print(f"\n=== 运行 threshold={threshold:.2f} ===")
         tpf, acc = run_single_eval(
             args.task_name,
@@ -191,6 +327,7 @@ def main() -> None:
             threshold,
             args.dream_or_ladda,
             args.merged_model,
+            force_rerun=not args.allow_cache,
         )
         acc = to_percent_if_needed(acc)
         print(f"threshold={threshold:.2f} -> TPF={tpf:.4f}, Acc={acc:.6f} (%)")
@@ -199,14 +336,19 @@ def main() -> None:
         if acc > max_acc:
             max_acc = acc
 
-        # 如果当前点明显低于历史最优（差 5 以上），就停止
-        if max_acc >= 0.0 and acc < max_acc - 5:
+        # 可选早停：当前点明显低于历史最优时停止
+        if (
+            args.early_stop_drop is not None
+            and max_acc >= 0.0
+            and acc < max_acc - args.early_stop_drop
+        ):
             print(
-                f"Acc={acc:.6f} 已经低于当前最大 Acc={max_acc:.6f} 的 5，停止扫阈值。"
+                f"Acc={acc:.6f} 已经低于当前最大 Acc={max_acc:.6f} 的 "
+                f"{args.early_stop_drop:.6f}，停止扫阈值。"
             )
             break
 
-        threshold = round(threshold + 0.1, 10)
+        threshold = round(threshold + threshold_step, 10)
 
     print("\n=== 所有点 (TPF, Acc) ===")
     for rho, y in points:

@@ -70,6 +70,52 @@ _evalplus_run() {
     )
 }
 
+diffllm() {
+    # 通用 d3LLM-Dream 评测入口（供 sweep_threshold_and_compute_aup.py 调用）
+    # 用法: bash eval_scripts/run_code_eval.sh diffllm <model> <task> [max_new_tokens] [diffusion_steps] [threshold]
+    local P="${1:-}"
+    local TASK_RAW="${2:-}"
+    local MAX_NEW_TOKENS="${3:-256}"
+    local DIFFUSION_STEPS="${4:-256}"
+    local THRESHOLD="${5:-0.4}"
+    if [[ -z "${P}" || -z "${TASK_RAW}" ]]; then
+        echo "用法: bash eval_scripts/run_code_eval.sh diffllm <model> <task> [max_new_tokens] [diffusion_steps] [threshold]" >&2
+        exit 1
+    fi
+    local TASK="${TASK_RAW}"
+    case "${TASK_RAW}" in
+        humaneval) TASK="humaneval_instruct" ;;
+        mbpp) TASK="mbpp_instruct" ;;
+    esac
+    export HF_ALLOW_CODE_EVAL=1
+    cd "${REPO_ROOT}/utils/utils_Dream/eval_instruct" || exit 1
+    PYTHONPATH=. accelerate launch --main_process_port 46666 -m lm_eval \
+        --model diffllm \
+        --model_args torch_compile=False,pretrained="${P}",trust_remote_code=True,max_new_tokens="${MAX_NEW_TOKENS}",diffusion_steps="${DIFFUSION_STEPS}",dtype=bfloat16,temperature=0.,alg=entropy_threshold,dParallel=False,threshold="${THRESHOLD}",generation_method=generation_multi_block,block_add_threshold=0.1,decoded_token_threshold=0.95,block_length=32,cache_delay_iter=2,refresh_interval=10000,early_stop=True \
+        --tasks "${TASK}" \
+        --device cuda \
+        --batch_size 1 \
+        --num_fewshot 0 \
+        --output_path ./eval_tmp/aup_threshold_sweep \
+        --log_samples --confirm_run_unsafe_code --apply_chat_template
+}
+
+diffllm_coder() {
+    # 通用 d3LLM-Dream-Coder 评测入口（供 sweep_threshold_and_compute_aup.py 调用）
+    # 用法: bash eval_scripts/run_code_eval.sh diffllm_coder <model> <dataset> [max_new_tokens] [diffusion_steps] [threshold]
+    local CKPT_DIR="${1:-}"
+    local DATASET="${2:-}"
+    local MAX_NEW_TOKENS="${3:-512}"
+    local DIFFUSION_STEPS="${4:-512}"
+    local THRESHOLD="${5:-0.5}"
+    if [[ -z "${CKPT_DIR}" || -z "${DATASET}" ]]; then
+        echo "用法: bash eval_scripts/run_code_eval.sh diffllm_coder <model> <dataset> [max_new_tokens] [diffusion_steps] [threshold]" >&2
+        exit 1
+    fi
+    cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens "${MAX_NEW_TOKENS}" --diffusion_steps "${DIFFUSION_STEPS}" --dataset "${DATASET}" --backend dllm --temperature 0. --generation_method generation_multi_block --alg entropy_threshold --threshold "${THRESHOLD}" --block_length 32 --block_add_threshold 0.1 --decoded_token_threshold 0.95 --cache_delay_iter 32 --early_stop True --torch_compile True
+}
+
 usage() {
     sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     echo "可用 recipe 见: bash $0 list"
@@ -232,7 +278,7 @@ dream_coder__humaneval_vanilla_dllm() {
 dream_coder__humaneval_d3llm_multiblock() {
     cd "${REPO_ROOT}/utils/utils_DreamCoder/code_eval" || exit 1
     CKPT_DIR="${MODEL_OVERRIDE:-d3LLM/d3LLM_Dream_Coder}"
-    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset humaneval --backend dllm --temperature 0. --generation_method generation_multi_block --alg entropy_threshold --threshold 0.5 --block_length 32 --block_add_threshold 0.1 --decoded_token_threshold 0.95 --cache_delay_iter 32 --early_stop True --torch_compile True
+    _evalplus_run --model "${CKPT_DIR}" --trust_remote_code True --max_new_tokens 512 --diffusion_steps 512 --dataset humaneval --backend dllm --temperature 0. --generation_method generation_multi_block --alg entropy_threshold --threshold 0.5 --block_length 32 --block_add_threshold 0.1 --decoded_token_threshold 0.97 --cache_delay_iter 32 --early_stop True --torch_compile True
 }
 
 dream_coder__mbpp_vanilla_dllm() {
@@ -443,6 +489,8 @@ case "${1:-}" in
         list_recipes
         exit 0
         ;;
+    diffllm) diffllm "${@:2}" ;;
+    diffllm_coder) diffllm_coder "${@:2}" ;;
     dream_gsm8k_cot__vanilla_entropy) dream_gsm8k_cot__vanilla_entropy ;;
     dream_gsm8k_cot__merged_mblock_kv_delay1) dream_gsm8k_cot__merged_mblock_kv_delay1 ;;
     dream_gsm8k_cot__d3llm_entropy) dream_gsm8k_cot__d3llm_entropy ;;

@@ -158,6 +158,11 @@ def run_codegen(
         identifier += f"_len_{kwargs['max_new_tokens']}"
     if kwargs.get("alg", None) is not None:
         identifier += f"_alg_{kwargs['alg']}"
+    if kwargs.get("threshold", None) is not None:
+        try:
+            identifier += f"_thr_{float(kwargs['threshold']):.2f}"
+        except Exception:
+            identifier += f"_thr_{kwargs['threshold']}"
     if evalperf_type:
         identifier += f"-{evalperf_type}"
 
