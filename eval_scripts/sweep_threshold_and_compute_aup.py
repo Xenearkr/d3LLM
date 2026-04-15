@@ -22,7 +22,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import yaml
 
 
@@ -34,8 +34,8 @@ def run_single_eval(
     dream_or_ladda: str,
     merged_model: str,
     force_rerun: bool = True,
-) -> Tuple[float, float]:
-    """调用统一评测入口，返回 (TPF, Acc)。"""
+) -> Tuple[float, float, Optional[float]]:
+    """调用统一评测入口，返回 (TPF, base_acc, plus_acc)。"""
     if dream_or_ladda == "ladda":
         cmd = [
             "bash",
@@ -100,6 +100,8 @@ def run_single_eval(
 
     tpf = None
     metric_pairs: List[Tuple[str, float]] = []
+    plus_acc: Optional[float] = None
+    section: Optional[str] = None  # "base" | "plus"
     for line in merged_output.splitlines():
         line = line.strip()
         # 运行日志中会多次出现吞吐指标，取最后一次。
@@ -112,6 +114,21 @@ def run_single_eval(
         )
         if m_tpf:
             tpf = float(m_tpf.group(1))
+            continue
+
+        # evalplus 输出段落标题，用于区分 base / plus 的 pass@1
+        ll = line.lower()
+        if "(base tests)" in ll:
+            section = "base"
+            continue
+        if "(base + extra tests)" in ll:
+            section = "plus"
+            continue
+
+        # evalplus 指标行如: pass@1: 0.744
+        m_pass = re.search(r"pass@1:\s*([0-9]+(?:\.[0-9]+)?)", line, flags=re.IGNORECASE)
+        if m_pass and section == "plus":
+            plus_acc = float(m_pass.group(1))
             continue
 
         # 简要结果中的指标行，形如: "exact_match,none: 0.123456"
@@ -168,7 +185,7 @@ def run_single_eval(
             f"stdout+stderr:\n{merged_output}"
         )
 
-    return tpf, acc
+    return tpf, acc, plus_acc
 
 
 def _evalplus_identifier(model: str, max_new_tokens: int, threshold: float) -> str:
@@ -301,6 +318,7 @@ def main() -> None:
     args = parser.parse_args()
 
     points: List[Tuple[float, float]] = []
+    points_plus: List[Tuple[float, float]] = []
     max_acc: float = -1.0
 
     threshold = float(args.threshold_init)
@@ -320,7 +338,7 @@ def main() -> None:
 
     while threshold <= threshold_end + 1e-12:
         print(f"\n=== 运行 threshold={threshold:.2f} ===")
-        tpf, acc = run_single_eval(
+        tpf, acc, acc_plus = run_single_eval(
             args.task_name,
             args.max_new_tokens,
             args.diffusion_steps,
@@ -332,6 +350,10 @@ def main() -> None:
         acc = to_percent_if_needed(acc)
         print(f"threshold={threshold:.2f} -> TPF={tpf:.4f}, Acc={acc:.6f} (%)")
         points.append((tpf, acc))
+        if acc_plus is not None:
+            acc_plus = to_percent_if_needed(acc_plus)
+            print(f"threshold={threshold:.2f} -> Acc+={acc_plus:.6f} (%)")
+            points_plus.append((tpf, acc_plus))
 
         if acc > max_acc:
             max_acc = acc
@@ -353,6 +375,10 @@ def main() -> None:
     print("\n=== 所有点 (TPF, Acc) ===")
     for rho, y in points:
         print(f"rho(TPF)={rho:.4f}, y(Acc%)={y:.6f}")
+    if points_plus:
+        print("\n=== 所有点 (TPF, Acc+) ===")
+        for rho, y in points_plus:
+            print(f"rho(TPF)={rho:.4f}, y(Acc+%)={y:.6f}")
 
     points = sorted(points, key=lambda x: x[0])
 
@@ -378,6 +404,14 @@ def main() -> None:
     existing[args.task_name][args.method_name] = [
         [float(rho), float(y)] for rho, y in points
     ]
+    # 对于 evalplus 的代码任务，自动额外写入 humaneval+/mbpp+ 曲线
+    if points_plus and args.task_name.lower() in {"humaneval", "mbpp"}:
+        plus_task = f"{args.task_name}+"
+        if plus_task not in existing or not isinstance(existing[plus_task], dict):
+            existing[plus_task] = {}
+        existing[plus_task][args.method_name] = [
+            [float(rho), float(y)] for rho, y in sorted(points_plus, key=lambda x: x[0])
+        ]
 
     with open(out_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(existing, f, sort_keys=False, allow_unicode=True)
