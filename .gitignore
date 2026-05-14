@@ -38,3 +38,4 @@ trajectory_data_apps/train/*.arrowtrajectory_data_bytedanceseed/
 trajectory_data_apps/train/*.arrow
 trajectory_data_bytedanceseed/
 d3llm/d3llm_DREAM/distill_2_coder_training_512/d3llm_train_finetune_hf_used.yaml
+evalplus_results_sglang/
