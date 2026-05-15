@@ -1,6 +1,6 @@
 # d3llm_train.yaml - DREAM distillation configuration
 model:
-    name: "Dream-org/Dream-Coder-v0-Instruct-7B"
+    name: "d3llm/d3llm_DREAM_Coder"
     trust_remote_code: true
     torch_dtype: "bfloat16"
 

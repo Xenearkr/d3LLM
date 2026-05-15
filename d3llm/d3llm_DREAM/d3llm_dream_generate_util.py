@@ -537,10 +537,12 @@ class DreamGenerationMixin:
                 f" is on {self.device.type}. You may experience unexpected behaviors or slower generation.",
                 UserWarning,
             )
+        # Prefer _pad_token_tensor: pad may be inferred from eos without setting pad_token_id; tensor==None is a Python bool.
+        pad_tensor = getattr(generation_config, "_pad_token_tensor", None)
         if (
-            hasattr(generation_config, "pad_token_id") and
-            torch.any(input_ids == generation_config.pad_token_id) and
-            attention_mask is None
+            pad_tensor is not None
+            and torch.any(input_ids == pad_tensor)
+            and attention_mask is None
         ):
             warnings.warn(
                 "Padding was detected but no attention mask is passed here. For correct "
