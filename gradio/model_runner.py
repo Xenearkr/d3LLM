@@ -32,6 +32,48 @@ from utils.utils_Dream.model.modeling_dream import DreamModel  # noqa: E402
 DEFAULT_MODEL = "d3LLM/d3LLM_Dream_Coder"
 
 
+def _coerce_message_content_to_str(raw: Any) -> str:
+    """Gradio 多轮对话里 content 可能是 str，也可能是多模态 list[dict]；模板只接受 str。"""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (int, float, bool)):
+        return str(raw)
+    if isinstance(raw, list):
+        parts: List[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                t = item.get("type")
+                if t == "text" and "text" in item:
+                    parts.append(str(item["text"]))
+                elif "text" in item:
+                    parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if isinstance(raw, dict) and "text" in raw:
+        return str(raw["text"])
+    return str(raw)
+
+
+def normalize_messages_for_chat_template(messages: List[Any]) -> List[Dict[str, str]]:
+    """转为 apply_chat_template 可用的 {role, content: str} 列表。"""
+    allowed = ("user", "assistant", "system")
+    out: List[Dict[str, str]] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role") or "user"
+        if role not in allowed:
+            role = "user"
+        content = _coerce_message_content_to_str(m.get("content"))
+        out.append({"role": role, "content": content})
+    return out
+
+
 @dataclass
 class GenerationParams:
     max_new_tokens: int = 256
@@ -159,6 +201,7 @@ class DreamCoderRunner:
         )
         mask_token_id = int(self.model.config.mask_token_id)
 
+        messages = normalize_messages_for_chat_template(messages)
         prompt_text = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False
         )
@@ -263,6 +306,7 @@ class DreamCoderRunner:
             params.max_new_tokens, params.block_size
         )
 
+        messages = normalize_messages_for_chat_template(messages)
         prompt_text = self.tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, tokenize=False
         )

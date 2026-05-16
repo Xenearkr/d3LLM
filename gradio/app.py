@@ -19,7 +19,12 @@ for p in (str(_GRADIO_DIR), str(_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from model_runner import DEFAULT_MODEL, GenerationParams, get_runner
+from model_runner import (
+    DEFAULT_MODEL,
+    GenerationParams,
+    get_runner,
+    normalize_messages_for_chat_template,
+)
 
 # 解码网格：16 列，行数随 max_new_tokens 变化；单元格用 1fr 铺满容器
 GRID_COLS = 16
@@ -158,6 +163,17 @@ def build_stats_dashboard_html(
     )
 
 
+def build_error_stats_html(msg: str) -> str:
+    esc = html.escape(msg)
+    return f'''<div class="stats-dashboard" style="font-family:{FONT_UI};">
+<div style="border:1px solid #fecaca;border-radius:12px;overflow:hidden;background:#fff;">
+<div style="padding:10px 14px;background:linear-gradient(135deg,#fef2f2,#fff7ed);border-bottom:1px solid #fecaca;">
+<span style="font-weight:600;color:#b91c1c;font-size:13px;">生成失败</span></div>
+<div style="padding:12px 14px;color:#7f1d1d;font-size:12px;line-height:1.55;word-break:break-word;">{esc}</div>
+<div style="padding:0 14px 12px;font-size:11px;color:#64748b;">多轮对话若仍失败，可点击「清空」后重试。已自动将消息中的非纯文本字段转为文本再送入模板。</div>
+</div></div>'''
+
+
 def build_single_step_grid_html(
     step: Optional[Dict[str, Any]],
     tokenizer,
@@ -235,17 +251,26 @@ def build_single_step_grid_html(
 
 def _viz_session_from_state(state: Optional[dict]) -> dict:
     if not state:
-        return {"trace_steps": [], "mask_id": 0, "grid_cols": GRID_COLS, "total_slots": 256}
+        return {
+            "trace_steps": [],
+            "mask_id": 0,
+            "grid_cols": GRID_COLS,
+            "total_slots": 256,
+            "model_path": DEFAULT_MODEL,
+        }
     return state
 
 
-def render_step_from_session(step_index: int, viz_state: dict) -> Tuple[str, int]:
+def render_step_from_session(step_index: float, viz_state: dict) -> Tuple[str, int]:
     sess = _viz_session_from_state(viz_state)
     steps = sess.get("trace_steps") or []
     if not steps:
         return PLACEHOLDER_VIZ, 0
-    idx = max(0, min(int(step_index), len(steps) - 1))
-    runner = get_runner()
+    idx = max(0, min(int(round(float(step_index))), len(steps) - 1))
+    mp = sess.get("model_path") or DEFAULT_MODEL
+    runner = get_runner(mp)
+    if not runner._loaded:
+        runner.load()
     tok = runner.tokenizer
     if tok is None:
         return PLACEHOLDER_VIZ, idx
@@ -309,7 +334,8 @@ def chat_respond_stream(
         )
         runner.load()
 
-    messages = list(history) + [{"role": "user", "content": message}]
+    norm_hist = normalize_messages_for_chat_template(history or [])
+    messages = norm_hist + [{"role": "user", "content": str(message).strip()}]
     params = GenerationParams(
         max_new_tokens=int(max_new_tokens),
         temperature=float(temperature),
@@ -329,6 +355,7 @@ def chat_respond_stream(
         "mask_id": mask_id,
         "grid_cols": GRID_COLS,
         "total_slots": aligned_tokens,
+        "model_path": model_path,
     }
 
     yield (
@@ -342,60 +369,100 @@ def chat_respond_stream(
         0,
     )
 
-    for chunk in runner.generate_stream(messages, params):
-        viz_state["trace_steps"] = chunk.trace_steps
-        step = chunk.trace_steps[chunk.step_index]
-        masks_rem = int(step.get("masks_remaining", 0))
-        n_steps = len(chunk.trace_steps)
-        max_step = max(0, n_steps - 1)
+    last_viz_html = PLACEHOLDER_VIZ
+    last_max_step = 0
+    try:
+        for chunk in runner.generate_stream(messages, params):
+            viz_state["trace_steps"] = chunk.trace_steps
+            step = chunk.trace_steps[chunk.step_index]
+            masks_rem = int(step.get("masks_remaining", 0))
+            n_steps = len(chunk.trace_steps)
+            max_step = max(0, n_steps - 1)
 
-        streaming_messages[-1] = {"role": "assistant", "content": chunk.partial_text + ("▌" if not chunk.done else "")}
-
-        display_idx = max_step
-        viz_html = build_single_step_grid_html(
-            chunk.trace_steps[display_idx],
-            runner.tokenizer,
-            mask_id,
-            grid_cols=GRID_COLS,
-            total_slots=aligned_tokens,
-        )
-
-        stats = build_stats_dashboard_html(
-            step_index=display_idx,
-            n_steps=n_steps,
-            nfe=chunk.nfe,
-            masks_remaining=masks_rem,
-            elapsed=chunk.elapsed_sec,
-            done=chunk.done,
-            result=chunk.result if chunk.done else None,
-        )
-
-        if chunk.done and chunk.result:
             streaming_messages[-1] = {
                 "role": "assistant",
-                "content": chunk.result.assistant_text,
+                "content": chunk.partial_text + ("▌" if not chunk.done else ""),
             }
 
+            display_idx = max_step
+            viz_html = build_single_step_grid_html(
+                chunk.trace_steps[display_idx],
+                runner.tokenizer,
+                mask_id,
+                grid_cols=GRID_COLS,
+                total_slots=aligned_tokens,
+            )
+            last_viz_html = viz_html
+            last_max_step = max_step
+
+            stats = build_stats_dashboard_html(
+                step_index=display_idx,
+                n_steps=n_steps,
+                nfe=chunk.nfe,
+                masks_remaining=masks_rem,
+                elapsed=chunk.elapsed_sec,
+                done=chunk.done,
+                result=chunk.result if chunk.done else None,
+            )
+
+            if chunk.done and chunk.result:
+                streaming_messages[-1] = {
+                    "role": "assistant",
+                    "content": chunk.result.assistant_text,
+                }
+
+            yield (
+                streaming_messages,
+                stats,
+                viz_html,
+                viz_state,
+                _step_slider_update(logical_step=display_idx, last_step_index=max_step),
+                display_idx,
+            )
+
+            if chunk.done:
+                break
+    except Exception as e:
+        streaming_messages[-1] = {
+            "role": "assistant",
+            "content": f"[生成出错] {str(e)}",
+        }
+        if viz_state.get("trace_steps"):
+            try:
+                idx = max(0, len(viz_state["trace_steps"]) - 1)
+                last_viz_html = build_single_step_grid_html(
+                    viz_state["trace_steps"][idx],
+                    runner.tokenizer,
+                    mask_id,
+                    grid_cols=GRID_COLS,
+                    total_slots=aligned_tokens,
+                )
+                last_max_step = max(0, len(viz_state["trace_steps"]) - 1)
+            except Exception:
+                pass
         yield (
             streaming_messages,
-            stats,
-            viz_html,
+            build_error_stats_html(str(e)),
+            last_viz_html,
             viz_state,
-            _step_slider_update(logical_step=display_idx, last_step_index=max_step),
-            display_idx,
+            _step_slider_update(logical_step=last_max_step, last_step_index=last_max_step),
+            last_max_step,
         )
 
-        if chunk.done:
-            break
 
-
-def on_step_slider_change(step_index: int, viz_state: dict):
+def on_step_slider_change(step_index: float, viz_state: dict):
     html_out, idx = render_step_from_session(step_index, viz_state)
     return html_out, idx
 
 
 def clear_chat():
-    empty_state = {"trace_steps": [], "mask_id": 0, "grid_cols": GRID_COLS, "total_slots": 256}
+    empty_state = {
+        "trace_steps": [],
+        "mask_id": 0,
+        "grid_cols": GRID_COLS,
+        "total_slots": 256,
+        "model_path": DEFAULT_MODEL,
+    }
     return (
         [],
         STATS_PLACEHOLDER_HTML,
@@ -431,16 +498,23 @@ CUSTOM_CSS = f"""
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="d3LLM Dream-Coder 可视化") as demo:
-        viz_state = gr.State({"trace_steps": [], "mask_id": 0, "grid_cols": GRID_COLS, "total_slots": 256})
+        viz_state = gr.State(
+            {
+                "trace_steps": [],
+                "mask_id": 0,
+                "grid_cols": GRID_COLS,
+                "total_slots": 256,
+                "model_path": DEFAULT_MODEL,
+            }
+        )
         current_step = gr.State(0)
 
         gr.Markdown(
-            "# d3LLM Dream-Coder 扩散解码可视化\n"
-            "左侧对话与右侧解码网格均为 **流式实时** 更新；右侧仅显示 **一个 Step**，用滑块切换历史步。",
+            "# diffusion LLM 解码可视化\n",
             elem_classes=["main-title"],
         )
         gr.Markdown(
-            "左侧为流式对话；下方 **生成参数** 与 **统计 / 采样参数** 并排；最右侧为解码网格（单元格随窗口放大）。",
+            "左侧为流式对话；右侧为解码网格; 下方为生成参数与统计 / 采样参数。",
             elem_classes=["sub-title"],
         )
 
