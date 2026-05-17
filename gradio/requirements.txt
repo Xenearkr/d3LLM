@@ -1,0 +1,7 @@
+gradio>=6.0,<7.0
+pandas>=2.0
+plotly>=5.0
+transformers==4.49.0
+tokenizers>=0.21,<0.22
+safetensors
+einops

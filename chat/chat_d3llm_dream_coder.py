@@ -27,7 +27,8 @@ from transformers import AutoModel, AutoTokenizer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Dream-Coder 模型（默认使用 d3LLM 版本）
-MODEL_PATH = "d3LLM/d3LLM_Dream_Coder"
+#MODEL_PATH = "d3LLM/d3LLM_Dream_Coder"
+MODEL_PATH = "XenonGas/finetune_d3LLM_DREAM_Coder"
 # 如需原生 Dream-Coder，请改为：
 # MODEL_PATH = "Dream-org/Dream-Coder-v0-Instruct-7B"
 
