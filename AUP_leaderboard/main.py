@@ -5,7 +5,7 @@ from plot_radar import plot_radar_chart
 from plot_histogram import plot_histogram
 
 DATA_PATHS = ['AUP_leaderboard/data_custom.yaml']
-IS_DARK_MODE = True
+IS_DARK_MODE = False
 
 # Collect AUP scores across all datasets for leaderboard
 leaderboard = {}  # {method_name: [(task_name, aup), ...]}
