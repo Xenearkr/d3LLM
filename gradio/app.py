@@ -26,9 +26,12 @@ from model_runner import (
     normalize_messages_for_chat_template,
 )
 
-# 解码网格：16 列，行数随 max_new_tokens 变化；单元格用 1fr 铺满容器
-GRID_COLS = 16
-GRID_GAP_PX = 4
+# 解码可视化：每个 token 为宽度随文本变化的矩形，流式换行排列
+GRID_COLS = 16  # 仅保留在 state 中作兼容字段
+TOKEN_FLOW_GAP_PX = 4
+# 主面板高度：左右列对齐，便于一屏展示带 <mask> 的完整流式回复
+MAIN_PANEL_VH = 82
+CHATBOT_HEIGHT_PX = 820
 
 FONT_UI = (
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", '
@@ -39,9 +42,17 @@ FONT_MONO = (
     'Consolas, "Liberation Mono", monospace'
 )
 
+MASK_DISPLAY_TEXT = "<mask>"
+
+
+def _mask_placeholder_for_chatbot(text: str) -> str:
+    """Gradio Chatbot 会按 Markdown/HTML 渲染内容，字面量 <mask> 会被当作标签而不显示。"""
+    return text.replace(MASK_DISPLAY_TEXT, html.escape(MASK_DISPLAY_TEXT))
+
+
 PLACEHOLDER_VIZ = f"""
-<div class="decode-viz-panel" style="width:100%;min-height:min(72vh,640px);padding:20px 16px;border-radius:12px;border:1px solid #e2e8f0;background:linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%);display:flex;align-items:center;justify-content:center;box-sizing:border-box;font-family:{FONT_UI};">
-  <p style="margin:0;color:#64748b;font-size:14px;text-align:center;line-height:1.65;">发送消息后，此处<b>实时</b>展示当前 Step 的解码网格（16 列，行数随生成长度变化）。<br/>灰色为 mask；下方滑块可回看各步。</p>
+<div class="decode-viz-panel" style="width:100%;min-height:min({MAIN_PANEL_VH}vh,780px);padding:20px 16px;border-radius:12px;border:1px solid #e2e8f0;background:linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%);display:flex;align-items:center;justify-content:center;box-sizing:border-box;font-family:{FONT_UI};">
+  <p style="margin:0;color:#64748b;font-size:14px;text-align:center;line-height:1.65;">发送消息后，此处<b>实时</b>展示当前 Step 的解码 token 流（矩形宽度随 token 文本变化，自动换行）。<br/>灰色为 mask；下方滑块可回看各步。</p>
 </div>
 """
 
@@ -66,12 +77,11 @@ def _confidence_bg(conf: float) -> str:
 
 def _cell_label_text(tokenizer, tid: int, mask_id: int) -> Tuple[str, bool]:
     if tid == mask_id:
-        return "▪", True
+        return MASK_DISPLAY_TEXT, True
     s = tokenizer.decode([tid], skip_special_tokens=False)
-    s = s.replace("\n", "↵").replace("\r", "").replace("\t", " ")
-    s = s.strip() or "·"
-    if len(s) > 8:
-        s = s[:7] + "…"
+    s = s.replace("\n", "↵").replace("\r", "").replace("\t", "→")
+    if not s:
+        return "·", False
     return s, False
 
 
@@ -181,12 +191,10 @@ def build_single_step_grid_html(
     grid_cols: int = GRID_COLS,
     total_slots: int = 256,
 ) -> str:
-    """单 Step 解码网格：单元格随容器等分放大，贴近边缘。"""
+    """单 Step 解码可视化：每个 token 为宽度随文本变化的矩形，流式换行。"""
     if step is None:
         return PLACEHOLDER_VIZ
 
-    cols = max(8, min(int(grid_cols), 32))
-    nrow = max(1, (total_slots + cols - 1) // cols)
     step_no = int(step.get("step", 0))
     n_new = int(step.get("num_decoded", 0))
     n_mask = int(step.get("masks_remaining", 0))
@@ -210,27 +218,30 @@ def build_single_step_grid_html(
         txt_esc = html.escape(text)
         if is_mask:
             bg, fg = "#cbd5e1", "#475569"
-            title = f"#{i} · [mask]"
+            title = f"#{i} · {MASK_DISPLAY_TEXT}"
+            size_style = "width:auto;padding:3px 6px;"
         else:
             conf = float(conf_opt) if conf_opt is not None else 0.85
             bg = _confidence_bg(conf)
             fg = "#0f172a"
             cstr = f"{conf:.3f}" if conf_opt is not None else "—"
             title = f"#{i} · id={tid} · conf={cstr}"
+            size_style = "width:auto;padding:3px 6px;"
 
         cells.append(
-            f'<div title="{html.escape(title)}" style="'
-            "min-width:0;min-height:0;width:100%;height:100%;box-sizing:border-box;"
-            "display:flex;align-items:center;justify-content:center;"
+            f'<div title="{html.escape(title)}" class="decode-token-chip" style="'
+            "box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;"
+            "flex:0 0 auto;white-space:pre;"
+            f"{size_style}"
             f"background:{bg};color:{fg};"
-            f"font-size:clamp(9px, min(1.9vw, 1.7vh), 13px);font-family:{FONT_MONO};"
-            "border-radius:4px;border:1px solid rgba(15,23,42,.08);overflow:hidden;"
-            'padding:2px 3px;line-height:1.15;text-align:center;">'
+            f"font-size:12px;font-family:{FONT_MONO};"
+            "border-radius:4px;border:1px solid rgba(15,23,42,.08);"
+            'line-height:1.25;">'
             f"{txt_esc}</div>"
         )
 
     cells_html = "".join(cells)
-    gap = GRID_GAP_PX
+    gap = TOKEN_FLOW_GAP_PX
 
     return (
         f'<div class="decode-viz-panel" style="width:100%;box-sizing:border-box;padding:12px 14px 14px;font-family:{FONT_UI};'
@@ -239,12 +250,10 @@ def build_single_step_grid_html(
         '<div style="margin:0 6px 8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;">'
         f'<span style="font-size:13px;font-weight:600;color:#1e293b;">Step {step_no}</span>'
         f'<span style="font-size:12px;color:#64748b;">本步新解 <b style="color:#4338ca;">{n_new}</b> · '
-        f'剩余 mask <b style="color:#0f172a;">{n_mask}</b> · 共 {total_slots} 格</span></div>'
-        '<div style="flex:1;min-height:min(72vh,820px);max-height:78vh;width:100%;overflow:auto;padding:12px 14px;box-sizing:border-box;">'
-        f'<div style="display:grid;width:100%;height:100%;min-height:min(68vh,760px);'
-        f"grid-template-columns:repeat({cols},minmax(0,1fr));"
-        f"grid-template-rows:repeat({nrow},minmax(0,1fr));"
-        f'gap:{gap}px;box-sizing:border-box;">'
+        f'剩余 mask <b style="color:#0f172a;">{n_mask}</b> · 共 {total_slots} token</span></div>'
+        f'<div style="flex:1;min-height:min({MAIN_PANEL_VH}vh,900px);max-height:{MAIN_PANEL_VH}vh;width:100%;overflow:auto;padding:12px 14px;box-sizing:border-box;">'
+        f'<div class="decode-token-flow" style="display:flex;flex-wrap:wrap;align-items:flex-start;'
+        f'align-content:flex-start;gap:{gap}px;width:100%;box-sizing:border-box;">'
         f"{cells_html}</div></div></div>"
     )
 
@@ -381,7 +390,9 @@ def chat_respond_stream(
 
             streaming_messages[-1] = {
                 "role": "assistant",
-                "content": chunk.partial_text + ("▌" if not chunk.done else ""),
+                "content": _mask_placeholder_for_chatbot(
+                    chunk.partial_text + ("▌" if not chunk.done else "")
+                ),
             }
 
             display_idx = max_step
@@ -410,7 +421,6 @@ def chat_respond_stream(
                     "role": "assistant",
                     "content": chunk.result.assistant_text,
                 }
-
             yield (
                 streaming_messages,
                 stats,
@@ -489,9 +499,23 @@ CUSTOM_CSS = f"""
     font-size: 15px !important;
     line-height: 1.65 !important;
 }}
+.main-chat-panel .chatbot {{
+    height: min({MAIN_PANEL_VH}vh, {CHATBOT_HEIGHT_PX}px) !important;
+    min-height: min({MAIN_PANEL_VH}vh, {CHATBOT_HEIGHT_PX}px) !important;
+}}
+.main-chat-panel .chatbot .bubble-wrap, .main-chat-panel .chatbot .message-wrap {{
+    max-height: none !important;
+}}
+.main-viz-panel .decode-viz-panel {{
+    min-height: min({MAIN_PANEL_VH}vh, 900px);
+}}
 .main-title {{ text-align: center; margin-bottom: 0; font-weight: 600; }}
 .sub-title {{ text-align: center; color: #64748b; font-size: 14px; margin-top: 0; line-height: 1.6; }}
 .decode-viz-panel {{ width: 100%; font-family: {FONT_UI}; }}
+.decode-token-flow .decode-token-chip {{
+    width: auto !important;
+    max-width: none !important;
+}}
 .stats-dashboard {{ max-height: 70vh; overflow-y: auto; font-family: {FONT_UI}; }}
 """
 
@@ -514,7 +538,7 @@ def build_app() -> gr.Blocks:
             elem_classes=["main-title"],
         )
         gr.Markdown(
-            "左侧为流式对话；右侧为解码网格; 下方为生成参数与统计 / 采样参数。",
+            "左侧为流式对话；右侧为 token 流式解码可视化；下方为生成参数与统计 / 采样参数。",
             elem_classes=["sub-title"],
         )
 
@@ -524,8 +548,8 @@ def build_app() -> gr.Blocks:
         load_status = gr.Textbox(label="模型状态", interactive=False)
 
         with gr.Row(equal_height=False):
-            with gr.Column(scale=1, min_width=360):
-                chatbot = gr.Chatbot(label="对话（流式）", height=520)
+            with gr.Column(scale=1, min_width=360, elem_classes=["main-chat-panel"]):
+                chatbot = gr.Chatbot(label="对话（流式）", height=CHATBOT_HEIGHT_PX)
                 msg = gr.Textbox(
                     label="输入消息",
                     placeholder="例如: Write a Python function to compute fibonacci.",
@@ -552,7 +576,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=1):
                         stats_html = gr.HTML(value=STATS_PLACEHOLDER_HTML)
 
-            with gr.Column(scale=1, min_width=420):
+            with gr.Column(scale=1, min_width=420, elem_classes=["main-viz-panel"]):
                 viz_html = gr.HTML(value=PLACEHOLDER_VIZ)
                 step_slider = gr.Slider(
                     minimum=0,
