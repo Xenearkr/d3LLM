@@ -29,7 +29,7 @@ def plot_histogram(data: dict, attributes: list, assigned_colors: dict = None, s
         grid_alpha = 0.15
     else:
         style_context = 'default'
-        bg_color = '#F5F5F7'
+        bg_color = 'white'
         fg_color = 'black'
         grid_color = '#86868b'
         grid_alpha = 0.3

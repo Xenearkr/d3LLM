@@ -23,6 +23,7 @@ from d3llm.d3llm_DREAM.d3llm_dream_generate_util import (  # noqa: E402
     DreamGenerationMixin,
 )
 from generation_trace import (  # noqa: E402
+    format_gen_region_display,
     sample_multi_block_with_trace,
     sample_multi_block_with_trace_stream,
 )
@@ -175,16 +176,19 @@ class DreamCoderRunner:
         return text.strip()
 
     def _partial_text_from_gen_ids(
-        self, gen_token_ids: List[int], mask_token_id: int
+        self,
+        gen_token_ids: List[int],
+        mask_token_id: int,
+        *,
+        total_slots: Optional[int] = None,
     ) -> str:
-        ids = [int(t) for t in gen_token_ids if int(t) != mask_token_id]
-        if not ids:
-            return "▌"
-        text = self.tokenizer.decode(ids, skip_special_tokens=True)
-        eos = self.tokenizer.eos_token or ""
-        if eos and eos in text:
-            text = text.split(eos)[0]
-        return text.strip() or "▌"
+        """生成区固定长度全文：已填 token 直接显示，未填位置为 <mask>。"""
+        return format_gen_region_display(
+            self.tokenizer,
+            gen_token_ids,
+            mask_token_id,
+            total_slots=total_slots,
+        )
 
     @torch.no_grad()
     def generate_stream(
@@ -242,7 +246,9 @@ class DreamCoderRunner:
                 nfe = event["nfe"]
                 step = trace_steps[-1]
                 partial = self._partial_text_from_gen_ids(
-                    step["gen_token_ids"], mask_token_id
+                    step["gen_token_ids"],
+                    mask_token_id,
+                    total_slots=max_new_tokens,
                 )
                 yield StreamChunk(
                     trace_steps=list(trace_steps),

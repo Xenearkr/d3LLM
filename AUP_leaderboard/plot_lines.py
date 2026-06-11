@@ -50,7 +50,7 @@ def plot_aup_curve(methods: dict, y_max: float, assigned_colors: dict = None, sa
         spine_color = 'white'
     else:
         style_context = 'default'
-        bg_color = '#F5F5F7' # Apple light gray
+        bg_color = 'white'
         fg_color = 'black'
         grid_color = '#86868b' # Apple gray
         grid_alpha = 0.3

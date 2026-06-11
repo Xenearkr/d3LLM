@@ -16,6 +16,26 @@ from d3llm.d3llm_DREAM.d3llm_dream_generate_util import (
 )
 
 
+def format_gen_region_display(
+    tokenizer,
+    gen_token_ids: List[int],
+    mask_token_id: int,
+    *,
+    total_slots: Optional[int] = None,
+) -> str:
+    """逐 token 拼接固定长度全文；mask 位置显示 <mask>，避免整段 decode 吞掉尾部未填位置。"""
+    ids = [int(t) for t in gen_token_ids]
+    if total_slots is not None and total_slots > len(ids):
+        ids = ids + [int(mask_token_id)] * (total_slots - len(ids))
+    parts: List[str] = []
+    for tid in ids:
+        if int(tid) == mask_token_id:
+            parts.append("<mask>")
+        else:
+            parts.append(tokenizer.decode([int(tid)], skip_special_tokens=False))
+    return "".join(parts)
+
+
 def _block_summary(block_states: Dict[int, dict]) -> List[dict]:
     rows = []
     for bid in sorted(block_states.keys()):
@@ -127,10 +147,9 @@ def sample_multi_block_with_trace_stream(
     gen_region_confidences: List[Optional[float]] = [None] * max_new_tokens
 
     gen_region = x[0, prompt_length : prompt_length + max_new_tokens].tolist()
-    snapshot_all_mask = tokenizer.decode(
-        gen_region, skip_special_tokens=False
-    ).replace(tokenizer.mask_token, "▮")
-
+    snapshot_all_mask = format_gen_region_display(
+        tokenizer, gen_region, mask_token_id, total_slots=max_new_tokens
+    )
     step0 = _append_step_record(
         trace_steps,
         step_no=0,
@@ -311,10 +330,10 @@ def sample_multi_block_with_trace_stream(
                     if block_decoded > 0:
                         block_states[bid]["mask_count"] -= block_decoded
 
-        gen_region_list = x[0, prompt_length:].tolist()
-        snapshot = tokenizer.decode(gen_region_list, skip_special_tokens=False)
-        snapshot_display = snapshot.replace(tokenizer.mask_token, "▮")
         gen_slice = x[0, prompt_length : prompt_length + max_new_tokens].tolist()
+        snapshot_display = format_gen_region_display(
+            tokenizer, gen_slice, mask_token_id, total_slots=max_new_tokens
+        )
 
         step_rec = _append_step_record(
             trace_steps,

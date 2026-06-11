@@ -42,7 +42,7 @@ def plot_radar_chart(data: dict, attributes: list, assigned_colors: dict = None,
         spine_color = 'white'
     else:
         style_context = 'default'
-        bg_color = '#F5F5F7' # Apple light gray
+        bg_color = 'white'
         fg_color = 'black'
         grid_color = '#86868b'
         grid_alpha = 0.3
