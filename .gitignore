@@ -39,3 +39,8 @@ trajectory_data_apps/train/*.arrow
 trajectory_data_bytedanceseed/
 d3llm/d3llm_DREAM/distill_2_coder_training_512/d3llm_train_finetune_hf_used.yaml
 evalplus_results_sglang/
+
+# 本地模型权重与运行时状态（见 models/README.md）
+models/*
+!models/README.md
+!models/.gitkeep
