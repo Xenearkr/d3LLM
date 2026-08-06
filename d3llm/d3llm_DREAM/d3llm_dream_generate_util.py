@@ -593,10 +593,14 @@ class DreamGenerationMixin:
         block_add_threshold = kwargs.get("block_add_threshold", 0.5)
         decoded_token_threshold = kwargs.get("decoded_token_threshold", 0.5)
         cache_delay_iter = kwargs.get("cache_delay_iter", 10000)    # how many steps to delay before KV-caching, default to 10000 steps (no KV-cache)
-        early_stop = kwargs.get("early_stop", False) # 作为参数传入
-        
-        # 包含两种情况，启用kv cache或不启用kv cache，根据 cache_delay_iter 取值作区分
-        if cache_delay_iter >= 10000:  
+        early_stop = kwargs.get("early_stop", False)
+        # Per-iteration hook (same semantics as vanilla Dream's generation_tokens_hook_func).
+        # Default no-op keeps existing behavior unchanged.
+        generation_tokens_hook_func = kwargs.pop(
+            "generation_tokens_hook_func", lambda step, x, logits: x
+        )
+
+        if cache_delay_iter >= 10000:
             # no KV-cache
             result, nfe = self._sample_multi_block(
                 input_ids,
@@ -607,6 +611,7 @@ class DreamGenerationMixin:
                 block_add_threshold=block_add_threshold,
                 decoded_token_threshold=decoded_token_threshold,
                 early_stop=early_stop,
+                generation_tokens_hook_func=generation_tokens_hook_func,
             )
         else:
             # KV-cache
@@ -621,6 +626,7 @@ class DreamGenerationMixin:
                 cache_delay_iter=cache_delay_iter,
                 refresh_interval=kwargs.get("refresh_interval", 10000),
                 early_stop=early_stop,
+                generation_tokens_hook_func=generation_tokens_hook_func,
             )
         return result, nfe
 
@@ -739,6 +745,7 @@ class DreamGenerationMixin:
         block_add_threshold: float = 0.5,
         decoded_token_threshold: float = 0.5,
         early_stop: bool = False,
+        generation_tokens_hook_func=None,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
         """
         Pipelined parallel decoding without cache. 多 block 无缓存版本
@@ -762,11 +769,14 @@ class DreamGenerationMixin:
         temperature = generation_config.temperature
         alg = generation_config.alg
         eos_token_id = generation_config.eos_token_id if early_stop else None
-        
+
+        if generation_tokens_hook_func is None:
+            generation_tokens_hook_func = lambda step, x, logits: x
+
         max_new_tokens = max_length - input_ids.shape[1]
         prompt_length = input_ids.shape[1]
-        x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id) # 预留位置：针对最后一个维度，开头填充0个元素，末尾填充max_new_tokens个元素，全为[MASK]
-        
+        x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id)
+
         # Prepare attention mask
         if attention_mask is not None and torch.any(attention_mask == 0.0):
             attention_mask_padded = F.pad(attention_mask, (0, max_new_tokens), value=1.0)
@@ -991,7 +1001,10 @@ class DreamGenerationMixin:
                         block_decoded = transfer_index[:, start:end].sum().item()
                         if block_decoded > 0:
                             block_states[bid]["mask_count"] -= block_decoded
-            
+
+            # Per-iteration streaming hook (no-op by default)
+            x = generation_tokens_hook_func(nfe, x, None)
+
             if nfe > 10000:
                 # # print(f"[DEBUG-MB] Breaking: nfe > 10000")
                 break
@@ -1014,6 +1027,7 @@ class DreamGenerationMixin:
         cache_delay_iter: int = 10000,
         refresh_interval: int = 10000,
         early_stop: bool = False,
+        generation_tokens_hook_func=None,
     ) -> Union[DreamModelOutput, torch.LongTensor]:
         """
         Pipelined parallel decoding with Delayed KV-Cache.
@@ -1029,10 +1043,13 @@ class DreamGenerationMixin:
         alg = generation_config.alg
         eos_token_id = generation_config.eos_token_id if early_stop else None
         
+        if generation_tokens_hook_func is None:
+            generation_tokens_hook_func = lambda step, x, logits: x
+
         max_new_tokens = max_length - input_ids.shape[1]
         prompt_length = input_ids.shape[1]
         num_blocks = (max_new_tokens + block_size - 1) // block_size
-        
+
         # Initialize sequence with masks
         x = F.pad(input_ids, (0, max_new_tokens), value=mask_token_id)
         
@@ -1430,8 +1447,11 @@ class DreamGenerationMixin:
                     for pos in decoded_positions:
                         if x[0, pos].item() == eos_token_id:
                             break
-            
-            # Safety check 避免陷入死循环，强制停止
+
+            # Per-iteration streaming hook (no-op by default)
+            x = generation_tokens_hook_func(nfe, x, None)
+
+            # Safety check
             if nfe > 10000:
                 break
         
