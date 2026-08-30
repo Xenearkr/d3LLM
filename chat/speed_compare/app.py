@@ -61,9 +61,9 @@ import gradio as gr
 #   dream:        AutoModel + diffusion_generate（标准阈值扩散）
 #   qwen:         AutoModelForCausalLM + TextIteratorStreamer（自回归流式）
 SPECS = [
-    ("vanilla", "dream_coder",    "dream"),
-    ("qwen",    "qwen2.5-coder",  "qwen"),
-    ("xenon",   "d3LLM_Coder",    "dream_mblock"),
+    ("vanilla", "Dream Coder",    "dream"),
+    ("qwen",    "Qwen2.5 Coder",  "qwen"),
+    ("xenon",   "d3LLM Coder",    "dream_mblock"),
 ]
 
 # key -> HuggingFace 仓库路径（加载模型用）
@@ -79,10 +79,10 @@ MBLOCK_THRESHOLD = 0.5
 # 启动时 warmup 的轮数（调试时可改小甚至 0 以加快重启）
 WARMUP_ROUNDS = 0
 
-# 标准扩散参数（vanilla Dream-Coder, 原始逐步熵扩散）
+# 标准扩散参数（vanilla Dream-Coder；steps==max_new_tokens ≈ 每步解 1 token，对齐评测）
 DREAM_PARAMS = dict(
     max_new_tokens=400,
-    steps=256,
+    steps=400,
     temperature=0.0,
     top_p=None,
     alg="entropy",
@@ -237,9 +237,10 @@ def _load_warmup_questions():
 # ---------------- 生成（每个模型一个后台线程） ----------------
 
 def _style_mask_tokens(text, mask_token="<mask>"):
-    """将 mask token 替换为带灰色背景的 HTML span，使其在 Markdown 中可见。"""
+    """将 mask token 换成灰底矩形：保留等长占位字符但不显示文字。"""
     if not mask_token or mask_token not in text:
         return text
+    # 保留原 token 文本撑开宽度；用 CSS 把文字设为透明，只露出背景矩形
     return text.replace(mask_token, f'<span class="mask-token">{mask_token}</span>')
 
 
@@ -422,7 +423,7 @@ def compare(prompt):
         # 与 outputs 列表顺序一致：每个模型 [标题(含统计), 消息] 交错
         interleaved = []
         for i in range(n):
-            header = f"**{SPECS[i][1]}**\n\n{stats[i]}"
+            header = f"# {SPECS[i][1]}\n\n{stats[i]}"
             interleaved.append(header)
             interleaved.append(streams[i])
         return tuple(interleaved)
@@ -491,21 +492,94 @@ def compare(prompt):
 
 def build_ui():
     custom_css = """
+    .model-header {
+        text-align: center !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        min-height: 4.2em !important;
+        width: 100% !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    .model-header * {
+        text-align: center !important;
+    }
+    .model-header h1,
+    .model-header h2,
     .model-header h3 {
-        font-size: 1.4em !important;
-        font-weight: 700 !important;
-        margin: 4px 0 !important;
+        font-size: 3.2em !important;
+        font-weight: 800 !important;
+        margin: 0 !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        line-height: 1.15 !important;
+        letter-spacing: -0.02em !important;
+        width: 100% !important;
+        text-align: center !important;
+        border: none !important;
+        border-top: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+    .model-header .prose,
+    .model-header .md,
+    .model-header > div,
+    .model-header > * {
+        border: none !important;
+        border-top: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+    }
+    /* 统计行：较小字号，仍居中 */
+    .model-header p {
+        font-size: 0.95em !important;
+        font-weight: 500 !important;
+        margin: 0.35em 0 0 0 !important;
+        color: #555 !important;
+        width: 100% !important;
+        border: none !important;
     }
     .model-content {
         font-size: 0.82em !important;
         line-height: 1.45 !important;
+        border: none !important;
+        border-top: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+    .model-content.block,
+    .model-content > .block,
+    .model-content .prose,
+    .model-content .md,
+    .model-content > div,
+    .model-content > * {
+        border: none !important;
+        border-top: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+    /* Gradio Markdown 外层 block 的上边框（橙色强调线） */
+    .block.model-content,
+    .block.model-header {
+        border: none !important;
+        border-top: none !important;
+        box-shadow: none !important;
     }
     .model-content .mask-token {
-        background-color: #d0d0d0;
-        color: #555;
+        background-color: #ececec;
+        color: transparent;
         border-radius: 3px;
-        padding: 1px 3px;
+        padding: 0 1px;
+        margin: 0 1px;
+        font-size: 0.78em;
+        line-height: 1.1;
         font-family: inherit;
+        user-select: none;
     }
     """
 
@@ -521,7 +595,7 @@ def build_ui():
         with gr.Row():
             for key, label, kind in SPECS:
                 with gr.Column(scale=1, min_width=300):
-                    header = gr.Markdown(f"### {label}", elem_classes=["model-header"])
+                    header = gr.Markdown(f"# {label}", elem_classes=["model-header"])
                     st = gr.Markdown("", elem_classes=["model-content"])
                     outputs += [header, st]
 
